@@ -1,0 +1,17 @@
+node_modules
+.venv
+venv
+__pycache__
+*.pyc
+.git
+.DS_Store
+*.db
+*.sqlite
+.env
+apps/backend/data/
+apps/backend/repos/
+apps/frontend/dist/
+apps/frontend/node_modules/
+coverage/
+htmlcov/
+.pytest_cache/

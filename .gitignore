@@ -1,0 +1,65 @@
+ # Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+*.egg
+
+# Node
+node_modules/
+.pnpm-store/
+
+# Vite / Frontend build
+apps/frontend/dist/
+
+# SQLite
+*.db
+*.sqlite
+*.sqlite3
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# IDE / Tools
+.vscode/
+.idea/
+.claude/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local cloned repos
+data/repos/
+apps/backend/repos/
+
+# Local data (DB is auto-created)
+apps/backend/data/
+
+# Test / Coverage
+.coverage
+htmlcov/
+.pytest_cache/
+coverage/
+
+# Credentials / tokens / keys
+**/github_token.json
+.git-credentials
+**/git-credentials
+**/*.pem
+**/*.key
+**/id_rsa
+**/id_ed25519
+**/id_ecdsa
+**/.ssh/
+
+# Misc
+*.log
