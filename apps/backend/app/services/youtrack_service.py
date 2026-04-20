@@ -2,15 +2,112 @@
 
 import logging
 import re
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
+from typing import Callable
 
 import httpx
 from sqlalchemy.orm import Session
+
+_ACTIVITY_FETCH_WORKERS = 10
+
+# ── Server-side activity cache ─────────────────────────────────────────
+# Short-lived memoization so summarize doesn't re-hit YouTrack for an
+# activity set the user just fetched. Keyed by (sorted project_ids tuple,
+# since_ts, until_ts). TTL is intentionally short — YouTrack data can
+# change mid-session, so we only absorb the "fetch then summarize" burst.
+
+_ACTIVITY_CACHE_TTL_S = 600  # 10 minutes
+_activity_cache_lock = threading.Lock()
+_activity_cache: dict[tuple, tuple[float, list]] = {}
+
+
+def _activity_cache_key(project_ids: list[str], since_ts: int, until_ts: int) -> tuple:
+    return (tuple(sorted(project_ids)), since_ts, until_ts)
+
+
+def get_cached_activities(
+    project_ids: list[str], since_ts: int, until_ts: int,
+):
+    """Return cached ActivityItem list if fresh, else None."""
+    key = _activity_cache_key(project_ids, since_ts, until_ts)
+    with _activity_cache_lock:
+        entry = _activity_cache.get(key)
+        if entry is None:
+            return None
+        cached_at, items = entry
+        if time.monotonic() - cached_at > _ACTIVITY_CACHE_TTL_S:
+            _activity_cache.pop(key, None)
+            return None
+    return items
+
+
+def _store_activities_in_cache(
+    project_ids: list[str], since_ts: int, until_ts: int, items: list,
+) -> None:
+    key = _activity_cache_key(project_ids, since_ts, until_ts)
+    with _activity_cache_lock:
+        # Bound the cache size to keep memory predictable — evict oldest.
+        if len(_activity_cache) >= 64:
+            oldest = min(_activity_cache.items(), key=lambda kv: kv[1][0])[0]
+            _activity_cache.pop(oldest, None)
+        _activity_cache[key] = (time.monotonic(), items)
+
+
+def fetch_activities_cached(
+    base_url: str,
+    token: str,
+    project_ids: list[str],
+    since_ts: int,
+    until_ts: int,
+    should_stop: Callable[[], bool] | None = None,
+    on_progress: Callable[[dict], None] | None = None,
+):
+    """Cache-aware wrapper around fetch_activities.
+
+    If a fresh cached result exists for this (project_ids, since, until)
+    tuple, return it immediately and emit a single synthetic progress event
+    so the streaming UI still has something to show. Otherwise delegate to
+    the network-hitting fetch_activities.
+    """
+    cached = get_cached_activities(project_ids, since_ts, until_ts)
+    if cached is not None:
+        logger.info(
+            "fetch_activities_cached: cache hit (%d events, projects=%s)",
+            len(cached), project_ids,
+        )
+        if on_progress:
+            on_progress({
+                "phase": "cache_hit",
+                "done": len(cached),
+                "total": len(cached),
+                "events_so_far": len(cached),
+            })
+        return cached
+    return fetch_activities(
+        base_url, token, project_ids, since_ts, until_ts,
+        should_stop=should_stop, on_progress=on_progress,
+    )
 
 from app.models import YouTrackBoard, YouTrackConfig, YouTrackIssueSnapshot
 from app.schemas import ActivityItem, IssueChange
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_token(db: Session) -> str:
+    """Env var > decrypted DB. Raises LookupError if neither is set, ValueError if decrypt fails."""
+    from app.config import settings
+    from app.services.crypto import decrypt
+
+    if settings.youtrack_api_token:
+        return settings.youtrack_api_token
+    cfg = db.query(YouTrackConfig).first()
+    if cfg and cfg.api_token_encrypted:
+        return decrypt(cfg.api_token_encrypted)
+    raise LookupError("No YouTrack token configured")
 
 def extract_board_id(url: str) -> str | None:
     """Extract the agile board ID from a YouTrack URL.
@@ -110,20 +207,32 @@ def _normalize_issue(raw: dict) -> dict:
         "assignee": assignee,
     }
 
-def sync_board(db: Session, board: YouTrackBoard) -> list[IssueChange]:
-    """Fetch current issues, diff against last snapshot, store new snapshot."""
-    from app.config import settings as app_settings
+def sync_board(
+    db: Session,
+    board: YouTrackBoard,
+    since: datetime | None = None,
+) -> tuple[list[IssueChange], datetime | None]:
+    """Fetch current issues, diff against baseline, store new snapshot.
+
+    Baseline selection:
+      - since=None → latest snapshot per issue (existing behavior)
+      - since=<datetime> → latest snapshot per issue where synced_at <= since
+    Returns (changes, baseline_synced_at). baseline_synced_at is the timestamp
+    of the most recent baseline snapshot considered, or None if no baseline
+    existed (first sync or no snapshots before `since`).
+    """
     config = board.config
-    token = app_settings.youtrack_api_token
+    token = resolve_token(db)
     now = datetime.now(UTC)
 
-    # Get previous snapshot
-    prev_snapshots = (
+    # Get previous snapshots (optionally filtered by date)
+    q = (
         db.query(YouTrackIssueSnapshot)
         .filter(YouTrackIssueSnapshot.board_id == board.id)
-        .order_by(YouTrackIssueSnapshot.synced_at.desc())
-        .all()
     )
+    if since is not None:
+        q = q.filter(YouTrackIssueSnapshot.synced_at <= since)
+    prev_snapshots = q.order_by(YouTrackIssueSnapshot.synced_at.desc()).all()
 
     # Deduplicate to latest per issue_id
     prev_by_id: dict[str, YouTrackIssueSnapshot] = {}
@@ -193,7 +302,39 @@ def sync_board(db: Session, board: YouTrackBoard) -> list[IssueChange]:
     board.last_synced_at = now
     db.commit()
 
-    return changes
+    baseline_synced_at = max((s.synced_at for s in prev_by_id.values()), default=None)
+    return changes, baseline_synced_at
+
+def list_projects(base_url: str, token: str, include_archived: bool = False) -> list[dict]:
+    """GET /api/admin/projects — return all projects the token can see.
+
+    Each item: {id, short_name, name, description, archived}.
+    """
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    r = httpx.get(
+        f"{base_url}/api/admin/projects",
+        headers=headers,
+        params={"fields": "id,shortName,name,description,archived", "$top": "1000"},
+        timeout=30,
+    )
+    r.raise_for_status()
+    raw = r.json()
+    projects = [
+        {
+            "id": p.get("id", ""),
+            "short_name": p.get("shortName", ""),
+            "name": p.get("name", "") or p.get("shortName", ""),
+            "description": p.get("description", "") or "",
+            "archived": bool(p.get("archived", False)),
+        }
+        for p in raw
+        if p.get("shortName")
+    ]
+    if not include_archived:
+        projects = [p for p in projects if not p["archived"]]
+    projects.sort(key=lambda p: p["short_name"])
+    return projects
+
 
 def get_board_project_ids(base_url: str, token: str, board_id: str) -> list[str]:
     """Get the project short names associated with a board."""
@@ -213,12 +354,22 @@ def fetch_activities(
     project_ids: list[str],
     since_ts: int,
     until_ts: int,
+    should_stop: Callable[[], bool] | None = None,
+    on_progress: Callable[[dict], None] | None = None,
 ) -> list[ActivityItem]:
     """Fetch issue activities using YouTrack's issue-level history.
 
     Uses GET /api/issues?query=...&fields=... to get issues updated in the
     date range, then GET /api/issues/{id}/activities to get per-issue history.
     This avoids the activitiesPage endpoint which requires broad permissions.
+
+    If `should_stop` is provided, it is called before each per-issue fetch;
+    returning True aborts the loop early and returns what was gathered so far.
+
+    If `on_progress` is provided, it is called periodically with a dict like
+    {"phase": str, "done": int, "total": int, "events_so_far": int}. It is
+    always called from the calling thread (i.e. if this fn runs in asyncio.to_thread,
+    the callback runs in that same thread).
     """
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
@@ -229,6 +380,8 @@ def fetch_activities(
     query = f"{project_filter} updated: {since_str} .. {until_str}"
 
     # Step 1: Get issues updated in the date range
+    if on_progress:
+        on_progress({"phase": "listing_issues", "done": 0, "total": 0, "events_so_far": 0})
     r = httpx.get(
         f"{base_url}/api/issues",
         headers=headers,
@@ -241,30 +394,70 @@ def fetch_activities(
     )
     r.raise_for_status()
     issues = r.json()
-    logger.info("Found %d issues updated in %s..%s for projects %s", len(issues), since_str, until_str, project_ids)
+    total = len(issues)
+    logger.info("Found %d issues updated in %s..%s for projects %s", total, since_str, until_str, project_ids)
+    if on_progress:
+        on_progress({"phase": "fetching_activities", "done": 0, "total": total, "events_so_far": 0})
 
     if not issues:
         return []
 
     all_items: list[ActivityItem] = []
 
-    # Step 2: For each issue, fetch its activities in the date range
-    for issue in issues:
+    def _fetch_one(issue: dict) -> list[ActivityItem]:
         issue_id_readable = issue.get("idReadable", "")
         issue_summary = issue.get("summary", "")
         issue_internal_id = issue.get("id", "")
-
         try:
-            activities = _fetch_issue_activities(
+            return _fetch_issue_activities(
                 base_url, headers, issue_internal_id,
                 issue_id_readable, issue_summary,
                 since_ts, until_ts,
             )
-            all_items.extend(activities)
         except Exception as e:
             logger.warning("Failed to fetch activities for %s: %s", issue_id_readable, e)
+            return []
+
+    # Step 2: fetch per-issue activities in parallel. Progress reports are
+    # emitted on each completion, so the client sees incremental updates.
+    cancelled = False
+    with ThreadPoolExecutor(max_workers=_ACTIVITY_FETCH_WORKERS) as pool:
+        futures = {pool.submit(_fetch_one, issue): idx for idx, issue in enumerate(issues)}
+        completed = 0
+        for future in as_completed(futures):
+            if should_stop and should_stop():
+                cancelled = True
+                # Best-effort: cancel any still-pending futures; running ones
+                # will finish but we won't wait for more progress events.
+                for f in futures:
+                    if not f.done():
+                        f.cancel()
+                break
+            try:
+                all_items.extend(future.result())
+            except Exception as e:  # already logged in _fetch_one, but be safe
+                logger.warning("Activity future raised: %s", e)
+            completed += 1
+            if on_progress and (completed == total or completed % 5 == 0):
+                on_progress({
+                    "phase": "fetching_activities",
+                    "done": completed, "total": total, "events_so_far": len(all_items),
+                })
+
+    if cancelled:
+        logger.info(
+            "fetch_activities: cancelled after %d/%d issues (collected %d events)",
+            completed, total, len(all_items),
+        )
+        if on_progress:
+            on_progress({"phase": "cancelled", "done": completed, "total": total, "events_so_far": len(all_items)})
 
     all_items.sort(key=lambda a: a.timestamp, reverse=True)
+
+    # Populate server-side cache only on a clean (non-cancelled) fetch.
+    if not cancelled:
+        _store_activities_in_cache(project_ids, since_ts, until_ts, all_items)
+
     return all_items
 
 def _fetch_issue_activities(
@@ -319,7 +512,8 @@ def _parse_activity(raw: dict, issue_id: str, issue_summary: str) -> ActivityIte
         return None
 
     author_data = raw.get("author") or {}
-    author = author_data.get("name") or author_data.get("login", "")
+    author_login = author_data.get("login") or None
+    author = author_data.get("name") or author_login or ""
 
     # Category detection: prefer category.id, fall back to activity $type
     category = raw.get("category") or {}
@@ -340,6 +534,7 @@ def _parse_activity(raw: dict, issue_id: str, issue_summary: str) -> ActivityIte
             issue_id=issue_id,
             issue_summary=issue_summary,
             author=author,
+            author_login=author_login,
             activity_type="created",
             field="",
             old_value=None,
@@ -353,6 +548,7 @@ def _parse_activity(raw: dict, issue_id: str, issue_summary: str) -> ActivityIte
             issue_id=issue_id,
             issue_summary=issue_summary,
             author=author,
+            author_login=author_login,
             activity_type="resolved",
             field="",
             old_value=None,
@@ -367,6 +563,7 @@ def _parse_activity(raw: dict, issue_id: str, issue_summary: str) -> ActivityIte
             issue_id=issue_id,
             issue_summary=issue_summary,
             author=author,
+            author_login=author_login,
             activity_type="comment",
             field="",
             old_value=None,
@@ -382,6 +579,7 @@ def _parse_activity(raw: dict, issue_id: str, issue_summary: str) -> ActivityIte
             issue_id=issue_id,
             issue_summary=issue_summary,
             author=author,
+            author_login=author_login,
             activity_type="field_change",
             field=field_name,
             old_value=old_val,

@@ -156,26 +156,77 @@ class OllamaModel(BaseModel):
 
 # ── YouTrack ──
 
+def _validate_base_url(v: str) -> str:
+    v = v.strip().rstrip("/")
+    if not re.match(r"^https?://[\w.\-]+(:\d+)?(/[\w.\-/]*)?$", v):
+        raise ValueError(
+            "Invalid YouTrack base URL. Must be an HTTP(S) URL "
+            "(e.g. https://youtrack.example.com)."
+        )
+    return v
+
+
+def _validate_token(v: str | None) -> str | None:
+    if v is None:
+        return None
+    v = v.strip()
+    if not v:
+        return None
+    if len(v) > 500:
+        raise ValueError("Token is unexpectedly long (max 500 chars).")
+    if any(c in v for c in "\r\n\t"):
+        raise ValueError("Token must not contain whitespace characters.")
+    return v
+
+
 class YouTrackConfigCreate(BaseModel):
     base_url: str
+    # Optional: write-only. When present, stored encrypted at rest.
+    # Never returned in any response. Send null/omit to leave the stored token unchanged.
+    api_token: str | None = None
 
     @field_validator("base_url")
     @classmethod
     def validate_base_url(cls, v: str) -> str:
-        v = v.strip().rstrip("/")
-        if not re.match(r"^https?://[\w.\-]+(:\d+)?(/[\w.\-/]*)?$", v):
-            raise ValueError(
-                "Invalid YouTrack base URL. Must be an HTTP(S) URL "
-                "(e.g. https://youtrack.example.com)."
-            )
-        return v
+        return _validate_base_url(v)
+
+    @field_validator("api_token")
+    @classmethod
+    def validate_api_token(cls, v: str | None) -> str | None:
+        return _validate_token(v)
+
 
 class YouTrackConfigRead(BaseModel):
+    """Token is never returned. Consumers get only status flags."""
     id: str
     base_url: str
     created_at: datetime
+    token_configured: bool = False
+    token_source: str | None = None  # "env" | "db" | None
 
     model_config = {"from_attributes": True}
+
+
+class YouTrackTestRequest(BaseModel):
+    """Test a token (and optional base URL) without persisting either."""
+    base_url: str | None = None
+    api_token: str | None = None
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, v: str | None) -> str | None:
+        return _validate_base_url(v) if v else None
+
+    @field_validator("api_token")
+    @classmethod
+    def validate_api_token(cls, v: str | None) -> str | None:
+        return _validate_token(v)
+
+
+class YouTrackTestResponse(BaseModel):
+    ok: bool
+    detail: str | None = None
+    username: str | None = None
 
 class YouTrackBoardAdd(BaseModel):
     board_url: str  # e.g. https://youtrack.example.com/agiles/123-45/current
@@ -222,17 +273,39 @@ class IssueChange(BaseModel):
     old_assignee: str | None = None
     new_assignee: str | None = None
 
+class BoardSyncRequest(BaseModel):
+    """Optional body for sync endpoints. Without `since`, compares against the latest snapshot."""
+    since: str | None = None  # YYYY-MM-DD — end-of-day UTC is used
+
+    @field_validator("since")
+    @classmethod
+    def validate_since(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        if not v:
+            return None
+        try:
+            datetime.strptime(v, "%Y-%m-%d")
+        except ValueError:
+            raise ValueError("since must be YYYY-MM-DD")
+        return v
+
+
 class BoardSyncResult(BaseModel):
     board_id: str
     board_name: str
     total_issues: int
     changes: list[IssueChange]
+    baseline_synced_at: datetime | None = None
+    since: str | None = None
 
 class ActivityItem(BaseModel):
     timestamp: int  # epoch ms
     issue_id: str
     issue_summary: str
-    author: str
+    author: str  # display name, falls back to login
+    author_login: str | None = None  # used to build a /users/<login> link
     activity_type: str  # "created" | "resolved" | "comment" | "field_change"
     field: str  # field name for field_change
     old_value: str | None = None
@@ -249,4 +322,79 @@ class BoardActivityResponse(BaseModel):
     since: str
     until: str
     activities: list[ActivityItem]
+
+
+class ActivitySummaryRequest(BaseModel):
+    since: str  # YYYY-MM-DD
+    until: str  # YYYY-MM-DD
+    summary_style: str | None = None  # "short" | "detailed" | "manager"
+    model_name: str | None = None
+
+    @field_validator("summary_style")
+    @classmethod
+    def validate_style(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        if v not in ("short", "detailed", "manager"):
+            raise ValueError("summary_style must be one of: short, detailed, manager")
+        return v
+
+
+class ActivitySummaryResponse(BaseModel):
+    board_id: str
+    board_name: str
+    since: str
+    until: str
+    summary_style: str
+    model_name: str
+    activity_count: int
+    summary_markdown: str
+    used_llm: bool  # False = deterministic fallback because Ollama was unreachable
+    generated_at: datetime
+
+
+class YouTrackProjectRead(BaseModel):
+    id: str
+    short_name: str
+    name: str
+    description: str = ""
+    archived: bool = False
+
+
+class ProjectActivityResponse(BaseModel):
+    project_short_name: str
+    project_name: str
+    since: str
+    until: str
+    activities: list[ActivityItem]
+
+
+class ActivitySummaryRead(BaseModel):
+    id: str
+    source_type: str
+    source_id: str
+    source_name: str
+    since: str
+    until: str
+    summary_style: str
+    model_name: str
+    activity_count: int
+    summary_markdown: str
+    used_llm: bool
+    generated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ProjectActivitySummaryResponse(BaseModel):
+    project_short_name: str
+    project_name: str
+    since: str
+    until: str
+    summary_style: str
+    model_name: str
+    activity_count: int
+    summary_markdown: str
+    used_llm: bool
+    generated_at: datetime
 

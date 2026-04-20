@@ -93,33 +93,37 @@ function parseHostInfo(remoteUrl: string): HostInfo {
  * Called AFTER markdownToHtml(), so we operate on HTML strings.
  */
 export function linkifyReferences(html: string, context: RepoContext | null): string {
-  if (!context) return html;
+  // NOTE: PROJECT-123 refs (step 3) are independent of repo context — they
+  // only require a globally-configured issue tracker. Do not bail out early
+  // when context is null, or activity-summary markdown (which has no repo)
+  // will leave issue refs as plain text.
 
-  const host = parseHostInfo(context.remote_url);
+  const host = context ? parseHostInfo(context.remote_url) : null;
 
-  // 1. Commit short-hashes: [abc1234] → link to commit
-  html = html.replace(
-    /\[([0-9a-f]{7,})\]/g,
-    (_match, hash: string) => {
-      const url = commitUrl(host, hash);
-      if (url) {
-        return `<a href="${url}" target="_blank" rel="noopener" class="ref-link ref-commit" title="View commit ${hash}">[${hash}]</a>`;
-      }
-      return `[${hash}]`;
-    },
-  );
+  // 1. Commit short-hashes: [abc1234] → link to commit  (requires repo context)
+  if (host) {
+    html = html.replace(
+      /\[([0-9a-f]{7,})\]/g,
+      (_match, hash: string) => {
+        const url = commitUrl(host, hash);
+        if (url) {
+          return `<a href="${url}" target="_blank" rel="noopener" class="ref-link ref-commit" title="View commit ${hash}">[${hash}]</a>`;
+        }
+        return `[${hash}]`;
+      },
+    );
 
-  // 2. Cross-repo refs: org/repo#N
-  html = html.replace(
-    /([\w.\-]+\/[\w.\-]+)#(\d+)/g,
-    (_match, repoPath: string, num: string) => {
-      const url = `${new URL(host.baseUrl).origin}/${repoPath}/issues/${num}`;
-      return `<a href="${url}" target="_blank" rel="noopener" class="ref-link ref-issue">${repoPath}#${num}</a>`;
-    },
-  );
+    // 2. Cross-repo refs: org/repo#N  (requires repo context for origin)
+    html = html.replace(
+      /([\w.\-]+\/[\w.\-]+)#(\d+)/g,
+      (_match, repoPath: string, num: string) => {
+        const url = `${new URL(host.baseUrl).origin}/${repoPath}/issues/${num}`;
+        return `<a href="${url}" target="_blank" rel="noopener" class="ref-link ref-issue">${repoPath}#${num}</a>`;
+      },
+    );
+  }
 
-  // 3. PROJECT-123 refs (any uppercase letters followed by dash and digits)
-  //    Only linked if an issue tracker is configured
+  // 3. PROJECT-123 refs — depends ONLY on the globally-configured tracker.
   if (_trackerType !== 'none' && _trackerBaseUrl) {
     html = html.replace(
       /\b([A-Z][A-Z0-9]+)-(\d+)\b/g,
@@ -131,17 +135,19 @@ export function linkifyReferences(html: string, context: RepoContext | null): st
     );
   }
 
-  // 4. #N refs (GitHub/GitLab style issue/PR numbers)
-  html = html.replace(
-    /(?<!="|\/)(#(\d+))\b/g,
-    (_match, full: string, num: string) => {
-      const url = issueOrPrUrl(host, num);
-      if (url) {
-        return `<a href="${url}" target="_blank" rel="noopener" class="ref-link ref-issue" title="Issue/PR ${full}">${full}</a>`;
-      }
-      return full;
-    },
-  );
+  // 4. #N refs (GitHub/GitLab style issue/PR numbers) — requires repo context
+  if (host) {
+    html = html.replace(
+      /(?<!="|\/)(#(\d+))\b/g,
+      (_match, full: string, num: string) => {
+        const url = issueOrPrUrl(host, num);
+        if (url) {
+          return `<a href="${url}" target="_blank" rel="noopener" class="ref-link ref-issue" title="Issue/PR ${full}">${full}</a>`;
+        }
+        return full;
+      },
+    );
+  }
 
   return html;
 }

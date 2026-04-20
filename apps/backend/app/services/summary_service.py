@@ -405,24 +405,19 @@ def _build_fallback_summary(
     filtered_count: int,
     refs: dict[str, IssueRef],
 ) -> str:
-    """Deterministic, no-LLM summary built from raw commit data."""
+    """Deterministic, no-LLM summary built from raw commit data.
+
+    Deliberately does NOT rank or list "top contributors" — summaries are
+    reported as team progress, not individual performance tracking.
+    """
     total = sum(len(cs) for _, cs in day_groups)
-    authors: dict[str, int] = defaultdict(int)
-    for _, cs in day_groups:
-        for c in cs:
-            authors[c.author_name] += 1
-    top_authors = sorted(authors.items(), key=lambda x: -x[1])[:5]
 
     lines = [
         f"# Commit Summary — {repo_name}",
         f"**Period:** {start_date} to {end_date}  ",
         f"**Commits analysed:** {total} ({filtered_count} noisy commits filtered)  ",
         f"**Active days:** {len(day_groups)}  ",
-        "",
-        "## Top Contributors",
     ]
-    for name, count in top_authors:
-        lines.append(f"- {name}: {count} commit{'s' if count != 1 else ''}")
 
     # Issue progress (deterministic)
     lines += ["", "## Issue Progress"]

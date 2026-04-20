@@ -85,12 +85,13 @@ class SummaryResult(Base):
 # ── YouTrack Boards ──
 
 class YouTrackConfig(Base):
-    """YouTrack server connection. Token comes from env var, not DB."""
+    """YouTrack server connection. Token is stored encrypted (Fernet) if set via UI; env var always takes precedence."""
 
     __tablename__ = "youtrack_configs"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     base_url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    api_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
 
     boards: Mapped[list["YouTrackBoard"]] = relationship(
@@ -115,6 +116,25 @@ class YouTrackBoard(Base):
     issue_snapshots: Mapped[list["YouTrackIssueSnapshot"]] = relationship(
         back_populates="board", cascade="all, delete-orphan"
     )
+
+class ActivitySummary(Base):
+    """Persisted AI-generated summary of YouTrack board or project activity."""
+
+    __tablename__ = "activity_summaries"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    source_type: Mapped[str] = mapped_column(String(16), nullable=False)  # "board" | "project"
+    source_id: Mapped[str] = mapped_column(String(255), nullable=False)   # board DB id or project short name
+    source_name: Mapped[str] = mapped_column(String(500), nullable=False) # human-readable label
+    since: Mapped[str] = mapped_column(String(10), nullable=False)        # YYYY-MM-DD
+    until: Mapped[str] = mapped_column(String(10), nullable=False)
+    summary_style: Mapped[str] = mapped_column(String(16), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    activity_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    summary_markdown: Mapped[str] = mapped_column(Text, nullable=False)
+    used_llm: Mapped[bool] = mapped_column(Boolean, default=True)
+    generated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
+
 
 class YouTrackIssueSnapshot(Base):
     """Point-in-time snapshot of an issue on a board."""

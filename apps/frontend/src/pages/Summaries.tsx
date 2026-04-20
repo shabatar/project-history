@@ -11,7 +11,7 @@ import {
   useBranches,
 } from '../lib/hooks';
 import DateRangePicker from '../components/DateRangePicker';
-import SummaryPanel from '../components/SummaryPanel';
+import SummaryPanel, { renderMarkdown } from '../components/SummaryPanel';
 import GenerationLog, {
   createLogEntry,
   type LogEntry,
@@ -331,7 +331,97 @@ export default function Summaries() {
             : null
         }
       />
+
+      <ActivitySummariesSection />
     </div>
+  );
+}
+
+function ActivitySummariesSection() {
+  const { data: features } = useQuery({ queryKey: ['features'], queryFn: api.getFeatures, staleTime: 60_000 });
+  const qc = useQueryClient();
+  const enabled = !!features?.youtrack;
+  const { data: summaries = [], isLoading } = useQuery({
+    queryKey: ['activity-summaries'],
+    queryFn: () => api.listActivitySummaries(100),
+    enabled,
+    refetchOnWindowFocus: false,
+  });
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  if (!enabled) return null;
+
+  async function handleDelete(id: string) {
+    if (!confirm('Delete this activity summary?')) return;
+    try {
+      await api.deleteActivitySummary(id);
+      qc.invalidateQueries({ queryKey: ['activity-summaries'] });
+      if (expandedId === id) setExpandedId(null);
+    } catch { /* ignore */ }
+  }
+
+  return (
+    <>
+      <div className="summary-history-header" style={{ marginTop: 24 }}>
+        <h3>Activity Summaries</h3>
+        <span className="page-header-sub">YouTrack board &amp; project flow summaries</span>
+      </div>
+      {isLoading ? (
+        <div className="empty-state"><p>Loading…</p></div>
+      ) : summaries.length === 0 ? (
+        <div className="empty-state">
+          <p>No activity summaries yet. Generate one from the <a href="/activity">Activity</a> page.</p>
+        </div>
+      ) : (
+        <div className="activity-summary-list">
+          {summaries.map((s) => (
+            <ActivitySummaryRow
+              key={s.id}
+              summary={s}
+              expanded={expandedId === s.id}
+              onToggle={() => setExpandedId(expandedId === s.id ? null : s.id)}
+              onDelete={() => handleDelete(s.id)}
+            />
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+function ActivitySummaryRow({
+  summary, expanded, onToggle, onDelete,
+}: {
+  summary: api.ActivitySummaryRecord;
+  expanded: boolean;
+  onToggle: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <article className="activity-summary-card">
+      <header className="activity-summary-head" onClick={onToggle} style={{ cursor: 'pointer' }}>
+        <span className={`activity-summary-type activity-summary-type-${summary.source_type}`}>
+          {summary.source_type}
+        </span>
+        <span className="activity-summary-name">{summary.source_name}</span>
+        <span className={`yt-summary-tag yt-summary-tag-${summary.summary_style}`}>
+          {summary.summary_style}
+        </span>
+        <span className="activity-summary-meta">
+          {summary.activity_count} ev · {summary.since} → {summary.until} · {summary.model_name}
+        </span>
+        {!summary.used_llm && <span className="yt-summary-fallback">fallback</span>}
+        <button className="btn btn-sm btn-danger" onClick={(e) => { e.stopPropagation(); onDelete(); }}>
+          Delete
+        </button>
+      </header>
+      {expanded && (
+        <div
+          className="summary-markdown"
+          dangerouslySetInnerHTML={{ __html: renderMarkdown(summary.summary_markdown, null) }}
+        />
+      )}
+    </article>
   );
 }
 

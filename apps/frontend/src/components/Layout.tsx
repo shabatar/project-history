@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import * as api from '../lib/api';
+import { configureIssueTracker } from '../lib/linkify';
 import { useAppStore, type Theme } from '../store';
 
 const coreNavItems = [
@@ -32,6 +33,28 @@ export default function Layout() {
     staleTime: 60_000,
   });
 
+  // Auto-configure issue tracker links from the live YouTrack config
+  // (so PROJ-123 refs in AI-generated summaries resolve to the real YouTrack).
+  // User-set tracker in Settings still wins if that was chosen explicitly.
+  const { data: ytConfig } = useQuery({
+    queryKey: ['yt-config'],
+    queryFn: api.getYouTrackConfig,
+    enabled: !!features?.youtrack,
+    staleTime: 60_000,
+  });
+
+  useEffect(() => {
+    const { settings } = useAppStore.getState();
+    // If the user picked a tracker in Settings, honor it.
+    if (settings?.issueTrackerType && settings?.issueTrackerType !== 'none' && settings?.issueTrackerUrl) {
+      configureIssueTracker(settings.issueTrackerType, settings.issueTrackerUrl);
+      return;
+    }
+    if (ytConfig?.base_url) {
+      configureIssueTracker('youtrack', ytConfig.base_url);
+    }
+  }, [ytConfig?.base_url]);
+
   const theme = useAppStore((s) => s.theme);
   const setTheme = useAppStore((s) => s.setTheme);
   const resolved = useResolvedTheme(theme);
@@ -48,7 +71,12 @@ export default function Layout() {
 
   const navItems = [
     ...coreNavItems,
-    ...(features?.youtrack ? [{ to: '/boards', label: 'Boards' }] : []),
+    ...(features?.youtrack
+      ? [
+          { to: '/activity', label: 'Activity' },
+          { to: '/boards', label: 'Boards' },
+        ]
+      : []),
     { to: '/settings', label: 'Settings' },
   ];
 

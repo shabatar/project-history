@@ -86,3 +86,34 @@ describe('linkifyReferences', () => {
     configureIssueTracker('youtrack', 'https://tracker.example.com');
   });
 });
+
+describe('linkifyReferences without repo context', () => {
+  // Activity-summary markdown has no repo context; PROJECT-123 refs must
+  // still be linkified by the globally-configured tracker, while repo-only
+  // refs (#N, [hash], org/repo#N) are left as plain text.
+
+  it('links PROJ-123 even when context is null', () => {
+    configureIssueTracker('youtrack', 'https://tracker.example.com');
+    const html = linkifyReferences('resolved PROJ-123 today', null);
+    expect(html).toContain('href="https://tracker.example.com/issue/PROJ-123"');
+    expect(html).toContain('>PROJ-123<');
+  });
+
+  it('leaves commit-hash brackets alone without repo context', () => {
+    const html = linkifyReferences('see [abc1234] for details', null);
+    expect(html).toContain('[abc1234]');
+    expect(html).not.toContain('href=');
+  });
+
+  it('leaves #42 alone without repo context', () => {
+    const html = linkifyReferences('Fix #42', null);
+    expect(html).toBe('Fix #42');
+  });
+
+  it('does not linkify PROJ-123 with null context when tracker is none', () => {
+    configureIssueTracker('none', '');
+    const html = linkifyReferences('See PROJ-123', null);
+    expect(html).toBe('See PROJ-123');
+    configureIssueTracker('youtrack', 'https://tracker.example.com');
+  });
+});
