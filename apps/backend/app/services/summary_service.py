@@ -322,8 +322,13 @@ Include issue refs. -->
 <!-- 2-3 sentences suitable for an executive email or Slack post -->
 """
 
-def _get_style_instructions(style: str, has_refs: bool) -> str:
+def _get_style_instructions(
+    style: str, has_refs: bool, custom_prompt: str | None = None
+) -> str:
     """Return style instructions with issue sections conditionally filled."""
+    if style == "custom" and custom_prompt:
+        return f"\n{custom_prompt.strip()}\n"
+
     issue_section = _ISSUE_PROGRESS_SECTION if has_refs else """
 ## Issue Progress
 <!-- No issue references found in this batch. -->
@@ -374,6 +379,7 @@ def _build_chunk_prompt(
     style: str,
     day_groups: list[DayGroup],
     refs: dict[str, IssueRef],
+    custom_prompt: str | None = None,
 ) -> str:
     commits_text = "\n\n".join(
         _format_day_group(day, commits) for day, commits in day_groups
@@ -386,7 +392,7 @@ def _build_chunk_prompt(
         chunk_index=chunk_index,
         total_chunks=total_chunks,
     )
-    instructions = _get_style_instructions(style, bool(refs))
+    instructions = _get_style_instructions(style, bool(refs), custom_prompt)
     refs_block = _format_references_block(refs)
     parts = [preamble, instructions, f"\nCOMMITS ({total_commits}):", commits_text]
     if refs_block:
@@ -504,6 +510,7 @@ async def create_and_run_summary(
     start_str = f"{job.start_date:%Y-%m-%d}"
     end_str = f"{job.end_date:%Y-%m-%d}"
     style = job.summary_style or "detailed"
+    custom_prompt = getattr(job, "custom_prompt", None)
 
     # ── Token-aware chunking ──
     chunks = chunk_by_token_budget(day_groups, settings.summary_token_budget)
@@ -531,6 +538,7 @@ async def create_and_run_summary(
                 style=style,
                 day_groups=chunk_groups,
                 refs=chunk_refs,
+                custom_prompt=custom_prompt,
             )
             partial = await ollama_service.generate(prompt, model=job.model_name)
             partial_summaries.append(partial)
@@ -604,6 +612,7 @@ def _build_branch_chunk_prompt(
     style: str,
     day_groups: list[DayGroup],
     refs: dict[str, IssueRef],
+    custom_prompt: str | None = None,
 ) -> str:
     commits_text = "\n\n".join(
         _format_day_group(day, commits) for day, commits in day_groups
@@ -616,7 +625,7 @@ def _build_branch_chunk_prompt(
         chunk_index=chunk_index,
         total_chunks=total_chunks,
     )
-    instructions = _get_style_instructions(style, bool(refs))
+    instructions = _get_style_instructions(style, bool(refs), custom_prompt)
     refs_block = _format_references_block(refs)
     parts = [preamble, instructions, f"\nCOMMITS on {branch} vs {base_branch} ({total_commits}):", commits_text]
     if refs_block:
@@ -664,6 +673,7 @@ async def create_and_run_branch_summary(
     refs = extract_references(commits)
     day_groups = group_by_day(commits)
     style = job.summary_style or "detailed"
+    custom_prompt = getattr(job, "custom_prompt", None)
 
     chunks = chunk_by_token_budget(day_groups, settings.summary_token_budget)
     total_chunks = len(chunks)
@@ -688,6 +698,7 @@ async def create_and_run_branch_summary(
                 style=style,
                 day_groups=chunk_groups,
                 refs=chunk_refs,
+                custom_prompt=custom_prompt,
             )
             partial = await ollama_service.generate(prompt, model=job.model_name)
             partial_summaries.append(partial)

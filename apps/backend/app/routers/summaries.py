@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import datetime
 
@@ -10,12 +11,16 @@ from app.database import get_db
 from app.repositories.repo_repository import RepoRepository
 from app.repositories.summary_repository import SummaryRepository
 from app.schemas import (
+    ItemLabelUpdate,
     OllamaModel,
     OllamaModelPullRequest,
+    SummaryCommentCreate,
+    SummaryCommentRead,
     SummaryJobCreate,
     SummaryJobWithResult,
 )
 from app.services import ollama_service, summary_service
+from app.services import comment_service
 from app.services.git_service import GitCommandError, GitService
 
 logger = logging.getLogger(__name__)
@@ -117,7 +122,7 @@ async def pull_model(body: OllamaModelPullRequest):
     model_name = body.name
     try:
         async with httpx.AsyncClient(
-            base_url=settings.ollama_base_url, timeout=600
+            base_url=settings.ollama_base_url, timeout=1800
         ) as c:
             resp = await c.post("/api/pull", json={"name": model_name, "stream": False})
             resp.raise_for_status()
@@ -138,10 +143,15 @@ async def create_summary(body: SummaryJobCreate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Repository not found")
 
     style = body.summary_style or "detailed"
-    if style not in ("short", "detailed", "manager"):
+    if style not in ("short", "detailed", "manager", "custom"):
         raise HTTPException(
             status_code=422,
-            detail=f"Invalid summary_style '{style}'. Choose: short, detailed, manager",
+            detail=f"Invalid summary_style '{style}'. Choose: short, detailed, custom",
+        )
+    if style == "custom" and not (body.custom_prompt or "").strip():
+        raise HTTPException(
+            status_code=422,
+            detail="custom_prompt is required when summary_style is 'custom'",
         )
 
     is_branch_mode = bool(body.branch)
@@ -173,6 +183,7 @@ async def create_summary(body: SummaryJobCreate, db: Session = Depends(get_db)):
             summary_style=style,
             branch=body.branch,
             base_branch=body.base_branch or repo.default_branch,
+            custom_prompt=body.custom_prompt if style == "custom" else None,
         )
 
         try:
@@ -200,6 +211,7 @@ async def create_summary(body: SummaryJobCreate, db: Session = Depends(get_db)):
             summary_style=style,
             start_date=datetime.fromisoformat(body.start_date),
             end_date=datetime.fromisoformat(body.end_date),
+            custom_prompt=body.custom_prompt if style == "custom" else None,
         )
 
         try:
@@ -224,3 +236,86 @@ def get_summary(job_id: str, db: Session = Depends(get_db)):
     if not job:
         raise HTTPException(status_code=404, detail="Summary job not found")
     return job
+
+
+@router.delete("/{job_id}", status_code=204)
+def delete_summary(job_id: str, db: Session = Depends(get_db)):
+    repo = SummaryRepository(db)
+    job = repo.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Summary job not found")
+    repo.delete_job(job)
+
+
+# ── Label ──
+
+@router.patch("/{job_id}/label", response_model=SummaryJobWithResult)
+def update_summary_label(job_id: str, body: ItemLabelUpdate, db: Session = Depends(get_db)):
+    job = SummaryRepository(db).get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Summary job not found")
+    label = body.user_label.strip() if body.user_label else None
+    job.user_label = label or None
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+# ── Comments ──
+
+@router.get("/{job_id}/comments", response_model=list[SummaryCommentRead])
+def list_git_comments(job_id: str, db: Session = Depends(get_db)):
+    if not SummaryRepository(db).get_job(job_id):
+        raise HTTPException(404, "Summary job not found")
+    return comment_service.list_comments(db, "git", job_id)
+
+
+@router.post("/{job_id}/comments", response_model=SummaryCommentRead, status_code=201)
+def create_git_comment(
+    job_id: str,
+    body: SummaryCommentCreate,
+    db: Session = Depends(get_db),
+):
+    if not SummaryRepository(db).get_job(job_id):
+        raise HTTPException(404, "Summary job not found")
+    return comment_service.create_comment(
+        db,
+        summary_type="git",
+        summary_id=job_id,
+        comment_type=body.comment_type,
+        user_content=body.user_content,
+    )
+
+
+@router.delete("/{job_id}/comments/{comment_id}", status_code=204)
+def delete_git_comment(job_id: str, comment_id: str, db: Session = Depends(get_db)):
+    c = comment_service.get_comment(db, comment_id)
+    if not c or c.summary_type != "git" or c.summary_id != job_id:
+        raise HTTPException(404, "Comment not found")
+    comment_service.delete_comment(db, comment_id)
+
+
+@router.post("/{job_id}/comments/{comment_id}/generate")
+async def generate_git_comment_reply(
+    job_id: str,
+    comment_id: str,
+    db: Session = Depends(get_db),
+):
+    job = SummaryRepository(db).get_job(job_id)
+    if not job or not job.result:
+        raise HTTPException(404, "Summary not found or has no result yet")
+
+    c = comment_service.get_comment(db, comment_id)
+    if not c or c.summary_type != "git" or c.summary_id != job_id:
+        raise HTTPException(404, "Comment not found")
+    if c.comment_type != "request":
+        raise HTTPException(400, "Only 'request' comments can generate AI replies")
+
+    return await comment_service.stream_reply(
+        db,
+        summary_type="git",
+        parent_id=job_id,
+        comment=c,
+        context_markdown=job.result.summary_markdown,
+        model=settings.default_model,
+    )

@@ -30,6 +30,8 @@ export interface SummaryJob {
   base_branch: string | null;
   model_name: string;
   summary_style: SummaryStyle;
+  custom_prompt?: string;
+  user_label: string | null;
   status: 'pending' | 'running' | 'completed' | 'failed';
   created_at: string;
   result: SummaryResult | null;
@@ -56,7 +58,7 @@ export interface OllamaModel {
   modified_at: string | null;
 }
 
-export type SummaryStyle = 'short' | 'detailed' | 'manager';
+export type SummaryStyle = 'short' | 'detailed' | 'custom';
 
 export interface DateRange {
   from: string;

@@ -61,6 +61,8 @@ class SummaryJob(Base):
     base_branch: Mapped[str | None] = mapped_column(String(255), nullable=True)
     model_name: Mapped[str] = mapped_column(String(255), nullable=False)
     summary_style: Mapped[str] = mapped_column(String(32), default="detailed")
+    custom_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    user_label: Mapped[str | None] = mapped_column(String(500), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="pending")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
 
@@ -128,12 +130,74 @@ class ActivitySummary(Base):
     source_name: Mapped[str] = mapped_column(String(500), nullable=False) # human-readable label
     since: Mapped[str] = mapped_column(String(10), nullable=False)        # YYYY-MM-DD
     until: Mapped[str] = mapped_column(String(10), nullable=False)
-    summary_style: Mapped[str] = mapped_column(String(16), nullable=False)
+    summary_style: Mapped[str] = mapped_column(String(32), nullable=False)
+    custom_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     model_name: Mapped[str] = mapped_column(String(255), nullable=False)
     activity_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     summary_markdown: Mapped[str] = mapped_column(Text, nullable=False)
     used_llm: Mapped[bool] = mapped_column(Boolean, default=True)
+    user_label: Mapped[str | None] = mapped_column(String(500), nullable=True)
     generated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
+
+    comments: Mapped[list["SummaryComment"]] = relationship(
+        "SummaryComment",
+        primaryjoin="and_(SummaryComment.summary_type == 'activity', foreign(SummaryComment.summary_id) == ActivitySummary.id)",
+        uselist=True,
+        viewonly=True,
+        order_by="SummaryComment.created_at",
+    )
+
+
+class SummaryComment(Base):
+    """User note or AI follow-up request attached to any summary (git or activity)."""
+
+    __tablename__ = "summary_comments"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    summary_type: Mapped[str] = mapped_column(String(16), nullable=False)  # "git" | "activity"
+    summary_id: Mapped[str] = mapped_column(String(32), nullable=False)    # job_id or activity_summary_id
+    comment_type: Mapped[str] = mapped_column(String(16), nullable=False)  # "note" | "request"
+    user_content: Mapped[str] = mapped_column(Text, nullable=False)
+    ai_response: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ai_status: Mapped[str] = mapped_column(String(16), nullable=False, default="none")  # "none" | "pending" | "done" | "error"
+    ai_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    model_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
+
+
+class ActivitySnapshot(Base):
+    """Raw (unprocessed) YouTrack activity events saved by the user for future reference."""
+
+    __tablename__ = "activity_snapshots"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    source_type: Mapped[str] = mapped_column(String(16), nullable=False)  # "board" | "project"
+    source_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_name: Mapped[str] = mapped_column(String(500), nullable=False)
+    since: Mapped[str] = mapped_column(String(10), nullable=False)
+    until: Mapped[str] = mapped_column(String(10), nullable=False)
+    activity_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    raw_json: Mapped[str] = mapped_column(Text, nullable=False)  # JSON array of ActivityItem
+    user_label: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
+
+
+class CommitSnapshot(Base):
+    """Raw commit list saved by the user for future reference."""
+
+    __tablename__ = "commit_snapshots"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    repository_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    repo_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    since: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    until: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    branch: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    base_branch: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    commit_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    raw_json: Mapped[str] = mapped_column(Text, nullable=False)  # JSON array of commits
+    user_label: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
 
 
 class YouTrackIssueSnapshot(Base):

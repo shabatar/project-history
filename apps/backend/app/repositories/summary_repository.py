@@ -17,6 +17,7 @@ class SummaryRepository:
         end_date: datetime | None = None,
         branch: str | None = None,
         base_branch: str | None = None,
+        custom_prompt: str | None = None,
     ) -> SummaryJob:
         job = SummaryJob(
             repository_id=repository_id,
@@ -26,6 +27,7 @@ class SummaryRepository:
             base_branch=base_branch,
             model_name=model_name,
             summary_style=summary_style,
+            custom_prompt=custom_prompt,
             status="pending",
         )
         self.db.add(job)
@@ -63,3 +65,7 @@ class SummaryRepository:
 
     def get_job(self, job_id: str) -> SummaryJob | None:
         return self.db.get(SummaryJob, job_id)
+
+    def delete_job(self, job: SummaryJob) -> None:
+        self.db.delete(job)
+        self.db.commit()

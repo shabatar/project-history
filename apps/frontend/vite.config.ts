@@ -9,8 +9,17 @@ export default defineConfig({
       '/health': 'http://localhost:8000',
       '/features': 'http://localhost:8000',
       '/repositories': 'http://localhost:8000',
-      '/summaries': 'http://localhost:8000',
+      '/summaries': {
+        target: 'http://localhost:8000',
+        bypass(req) {
+          // Navigation requests (browser page loads) must get the SPA, not backend JSON
+          if (req.headers.accept?.includes('text/html')) return '/index.html';
+          return null;
+        },
+      },
+      '/commit-snapshots': 'http://localhost:8000',
       '/youtrack': 'http://localhost:8000',
+      '/logs': 'http://localhost:8000',
     },
   },
   test: {

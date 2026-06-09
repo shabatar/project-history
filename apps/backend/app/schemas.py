@@ -94,7 +94,8 @@ class SummaryJobCreate(BaseModel):
     branch: str | None = None      # if set, summarize branch diff
     base_branch: str | None = None # compare against (default: repo default branch)
     model_name: str | None = None
-    summary_style: str | None = None  # "short" | "detailed" | "manager"
+    summary_style: str | None = None   # "short" | "detailed" | "custom"
+    custom_prompt: str | None = None   # required when summary_style="custom"
 
     @field_validator("branch", "base_branch")
     @classmethod
@@ -113,9 +114,14 @@ class SummaryJobRead(BaseModel):
     model_name: str
     summary_style: str
     status: str
+    user_label: str | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class ItemLabelUpdate(BaseModel):
+    user_label: str | None = None
 
 class SummaryResultRead(BaseModel):
     id: str
@@ -181,9 +187,7 @@ def _validate_token(v: str | None) -> str | None:
 
 class YouTrackConfigCreate(BaseModel):
     base_url: str
-    # Optional: write-only. When present, stored encrypted at rest.
-    # Never returned in any response. Send null/omit to leave the stored token unchanged.
-    api_token: str | None = None
+    api_token: str | None = None  # write-only; never returned
 
     @field_validator("base_url")
     @classmethod
@@ -197,18 +201,16 @@ class YouTrackConfigCreate(BaseModel):
 
 
 class YouTrackConfigRead(BaseModel):
-    """Token is never returned. Consumers get only status flags."""
     id: str
     base_url: str
     created_at: datetime
     token_configured: bool = False
-    token_source: str | None = None  # "env" | "db" | None
+    token_source: str | None = None
 
     model_config = {"from_attributes": True}
 
 
 class YouTrackTestRequest(BaseModel):
-    """Test a token (and optional base URL) without persisting either."""
     base_url: str | None = None
     api_token: str | None = None
 
@@ -327,7 +329,8 @@ class BoardActivityResponse(BaseModel):
 class ActivitySummaryRequest(BaseModel):
     since: str  # YYYY-MM-DD
     until: str  # YYYY-MM-DD
-    summary_style: str | None = None  # "short" | "detailed" | "manager"
+    summary_style: str | None = None  # "short" | "detailed" | "custom"
+    custom_prompt: str | None = None   # required when summary_style="custom"
     model_name: str | None = None
 
     @field_validator("summary_style")
@@ -335,9 +338,46 @@ class ActivitySummaryRequest(BaseModel):
     def validate_style(cls, v: str | None) -> str | None:
         if v is None:
             return None
-        if v not in ("short", "detailed", "manager"):
-            raise ValueError("summary_style must be one of: short, detailed, manager")
+        if v not in ("short", "detailed", "manager", "custom"):
+            raise ValueError("summary_style must be one of: short, detailed, custom")
         return v
+
+
+class SummaryCommentCreate(BaseModel):
+    comment_type: str   # "note" | "request"
+    user_content: str
+
+    @field_validator("comment_type")
+    @classmethod
+    def validate_comment_type(cls, v: str) -> str:
+        if v not in ("note", "request"):
+            raise ValueError("comment_type must be 'note' or 'request'")
+        return v
+
+    @field_validator("user_content")
+    @classmethod
+    def validate_content(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("user_content must not be empty")
+        if len(v) > 4000:
+            raise ValueError("user_content must not exceed 4000 characters")
+        return v
+
+
+class SummaryCommentRead(BaseModel):
+    id: str
+    summary_type: str
+    summary_id: str
+    comment_type: str
+    user_content: str
+    ai_response: str | None
+    ai_status: str
+    ai_error: str | None
+    model_name: str | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
 
 
 class ActivitySummaryResponse(BaseModel):
@@ -377,11 +417,14 @@ class ActivitySummaryRead(BaseModel):
     since: str
     until: str
     summary_style: str
+    custom_prompt: str | None = None
     model_name: str
     activity_count: int
     summary_markdown: str
     used_llm: bool
+    user_label: str | None = None
     generated_at: datetime
+    comment_count: int = 0
 
     model_config = {"from_attributes": True}
 
@@ -397,4 +440,70 @@ class ProjectActivitySummaryResponse(BaseModel):
     summary_markdown: str
     used_llm: bool
     generated_at: datetime
+
+
+# ── Snapshots ──
+
+class ActivitySnapshotCreate(BaseModel):
+    source_type: str         # "board" | "project"
+    source_id: str
+    source_name: str
+    since: str               # YYYY-MM-DD
+    until: str
+    activities: list[ActivityItem]  # raw events; capped at 20 000 items
+
+    @field_validator("source_type")
+    @classmethod
+    def _check_source_type(cls, v: str) -> str:
+        if v not in ("board", "project"):
+            raise ValueError("source_type must be 'board' or 'project'")
+        return v
+
+    @field_validator("activities")
+    @classmethod
+    def _cap_activities(cls, v: list) -> list:
+        return v[:10_000]
+
+class ActivitySnapshotRead(BaseModel):
+    id: str
+    source_type: str
+    source_id: str
+    source_name: str
+    since: str
+    until: str
+    activity_count: int
+    user_label: str | None = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class CommitSnapshotCreate(BaseModel):
+    repository_id: str
+    repo_name: str
+    since: str | None = None
+    until: str | None = None
+    branch: str | None = None
+    base_branch: str | None = None
+    commits: list[dict]      # raw commit dicts; capped at 5 000
+
+    @field_validator("commits")
+    @classmethod
+    def _cap_commits(cls, v: list) -> list:
+        return v[:5_000]
+
+class CommitSnapshotRead(BaseModel):
+    id: str
+    repository_id: str
+    repo_name: str
+    since: str | None
+    until: str | None
+    branch: str | None
+    base_branch: str | None
+    commit_count: int
+    user_label: str | None = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
 

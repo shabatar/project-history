@@ -1,27 +1,21 @@
-import { Routes, Route } from 'react-router-dom';
+import { Routes, Route, Navigate } from 'react-router-dom';
 import Layout from './components/Layout';
-import Repositories from './pages/Repositories';
-import CommitExplorer from './pages/CommitExplorer';
-import Summaries from './pages/Summaries';
 import SummaryDetail from './pages/SummaryDetail';
-import Boards from './pages/Boards';
-import ActivityFlow from './pages/ActivityFlow';
-import Settings from './pages/Settings';
+import ActivitySnapshotDetail from './pages/ActivitySnapshotDetail';
+import CommitSnapshotDetail from './pages/CommitSnapshotDetail';
+import ActivitySummaryDetail from './pages/ActivitySummaryDetail';
 
 export default function App() {
   return (
     <Routes>
       <Route element={<Layout />}>
-        <Route index element={<Repositories />} />
-        <Route path="repositories" element={<Repositories />} />
-        <Route path="commits" element={<CommitExplorer />} />
-        <Route path="summaries" element={<Summaries />} />
         <Route path="summaries/:jobId" element={<SummaryDetail />} />
-        <Route path="boards" element={<Boards />} />
-        <Route path="activity" element={<ActivityFlow />} />
-        <Route path="projects" element={<ActivityFlow />} />
-
-        <Route path="settings" element={<Settings />} />
+        <Route path="reports/snapshot/:snapshotId" element={<ActivitySnapshotDetail />} />
+        <Route path="reports/commit-snapshot/:snapshotId" element={<CommitSnapshotDetail />} />
+        <Route path="reports/activity-summary/:summaryId" element={<ActivitySummaryDetail />} />
+        <Route path="activity" element={<Navigate to="/boards" replace />} />
+        <Route path="projects" element={<Navigate to="/boards" replace />} />
+        <Route path="*" element={null} />
       </Route>
     </Routes>
   );

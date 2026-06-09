@@ -21,10 +21,20 @@ const SUGGESTED_MODELS = [
   { name: 'qwen2.5:0.5b', desc: 'Tiny, low RAM' },
 ];
 
+const ACTION_PAST: Record<string, string> = {
+  download: 'downloaded',
+  start: 'started',
+  stop: 'stopped',
+  delete: 'deleted',
+};
+
+type SettingsTab = 'general' | 'logs';
+
 export default function Settings() {
   const qc = useQueryClient();
   const { settings, setSettings, summaryStyle, setSummaryStyle } = useAppStore();
   const { data: models = [], isError: modelsError } = useOllamaModels();
+  const [tab, setTab] = useState<SettingsTab>('general');
 
   useEffect(() => {
     configureIssueTracker(settings.issueTrackerType, settings.issueTrackerUrl);
@@ -37,64 +47,152 @@ export default function Settings() {
     <div className="page">
       <div className="page-header"><h2>Settings</h2></div>
 
-      <div className="settings-sections">
-        <section className="settings-section">
-          <h3>Models</h3>
-          <form className="settings-form" onSubmit={(e) => e.preventDefault()}>
-            <div className="form-group">
-              <label className="form-label" htmlFor="ollamaUrl">Server URL</label>
-              <input id="ollamaUrl" type="text" className="input" value={settings.ollamaBaseUrl}
-                onChange={(e) => setSettings({ ollamaBaseUrl: e.target.value })} placeholder="http://localhost:11434" />
-            </div>
-            <div className="form-group">
-              <label className="form-label" htmlFor="summaryStyle">Default Summary Style</label>
-              <select id="summaryStyle" className="input" value={summaryStyle}
-                onChange={(e) => setSummaryStyle(e.target.value as 'short' | 'detailed' | 'manager')}>
-                <option value="short">Short</option>
-                <option value="detailed">Detailed (engineering)</option>
-                <option value="manager">Briefly</option>
-              </select>
-            </div>
-          </form>
-
-          <ModelManager
-            models={models}
-            modelsError={modelsError}
-            defaultModel={settings.defaultModel}
-            onSetDefault={(name) => setSettings({ defaultModel: name })}
-            onRefresh={() => qc.invalidateQueries({ queryKey: ['ollama-models'] })}
-          />
-        </section>
-
-        <section className="settings-section">
-          <h3>Issue Tracker</h3>
-          <form className="settings-form" onSubmit={(e) => e.preventDefault()}>
-            <div className="form-group">
-              <label className="form-label" htmlFor="trackerType">Tracker Type</label>
-              <select id="trackerType" className="input" value={settings.issueTrackerType}
-                onChange={(e) => setSettings({ issueTrackerType: e.target.value as IssueTrackerType })}>
-                {TRACKER_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>{opt.label}</option>
-                ))}
-              </select>
-              {activeTracker && <span className="form-hint">{activeTracker.hint}</span>}
-            </div>
-            {showUrlField && (
-              <div className="form-group">
-                <label className="form-label" htmlFor="trackerUrl">
-                  {settings.issueTrackerType === 'youtrack' ? 'YouTrack URL' : 'Jira URL'}
-                </label>
-                <input id="trackerUrl" type="text" className="input" value={settings.issueTrackerUrl}
-                  onChange={(e) => setSettings({ issueTrackerUrl: e.target.value })}
-                  placeholder={settings.issueTrackerType === 'youtrack' ? 'https://youtrack.example.com' : 'https://jira.example.com'} />
-                <span className="form-hint">References like PROJ-123 in summaries will link to this instance.</span>
-              </div>
-            )}
-          </form>
-        </section>
+      <div className="act-section-tabs">
+        <button className={`act-section-tab${tab === 'general' ? ' active' : ''}`} onClick={() => setTab('general')}>General</button>
+        <button className={`act-section-tab${tab === 'logs' ? ' active' : ''}`} onClick={() => setTab('logs')}>Logs</button>
       </div>
+
+      {tab === 'general' && (
+        <div className="settings-sections">
+          <section className="settings-section">
+            <h3>Models</h3>
+            <form className="settings-form" onSubmit={(e) => e.preventDefault()}>
+              <div className="form-group">
+                <label className="form-label" htmlFor="ollamaUrl">Server URL</label>
+                <input id="ollamaUrl" type="text" className="input" value={settings.ollamaBaseUrl}
+                  onChange={(e) => setSettings({ ollamaBaseUrl: e.target.value })} placeholder="http://localhost:11434" />
+              </div>
+              <div className="form-group">
+                <label className="form-label" htmlFor="summaryStyle">Default Summary Style</label>
+                <select id="summaryStyle" className="input" value={summaryStyle}
+                  onChange={(e) => setSummaryStyle(e.target.value as 'short' | 'detailed' | 'custom')}>
+                  <option value="short">Brief</option>
+                  <option value="detailed">Detailed</option>
+                  <option value="custom">Custom prompt</option>
+                </select>
+              </div>
+            </form>
+
+            <ModelManager
+              models={models}
+              modelsError={modelsError}
+              defaultModel={settings.defaultModel}
+              onSetDefault={(name) => setSettings({ defaultModel: name })}
+              onRefresh={() => qc.invalidateQueries({ queryKey: ['ollama-models'] })}
+            />
+          </section>
+
+          <section className="settings-section">
+            <h3>Issue Tracker</h3>
+            <form className="settings-form" onSubmit={(e) => e.preventDefault()}>
+              <div className="form-group">
+                <label className="form-label" htmlFor="trackerType">Tracker Type</label>
+                <select id="trackerType" className="input" value={settings.issueTrackerType}
+                  onChange={(e) => setSettings({ issueTrackerType: e.target.value as IssueTrackerType })}>
+                  {TRACKER_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                  ))}
+                </select>
+                {activeTracker && <span className="form-hint">{activeTracker.hint}</span>}
+              </div>
+              {showUrlField && (
+                <div className="form-group">
+                  <label className="form-label" htmlFor="trackerUrl">
+                    {settings.issueTrackerType === 'youtrack' ? 'YouTrack URL' : 'Jira URL'}
+                  </label>
+                  <input id="trackerUrl" type="text" className="input" value={settings.issueTrackerUrl}
+                    onChange={(e) => setSettings({ issueTrackerUrl: e.target.value })}
+                    placeholder={settings.issueTrackerType === 'youtrack' ? 'https://youtrack.example.com' : 'https://jira.example.com'} />
+                  <span className="form-hint">References like PROJ-123 in summaries will link to this instance.</span>
+                </div>
+              )}
+            </form>
+          </section>
+        </div>
+      )}
+
+      {tab === 'logs' && <LogsPanel />}
     </div>
   );
+}
+
+const LEVEL_CLASS: Record<string, string> = {
+  ERROR: 'log-level-error',
+  CRITICAL: 'log-level-error',
+  WARNING: 'log-level-warn',
+  WARN: 'log-level-warn',
+  INFO: 'log-level-info',
+  DEBUG: 'log-level-debug',
+  RAW: 'log-level-debug',
+};
+
+function LogsPanel() {
+  const { data, isFetching, refetch } = useQuery({
+    queryKey: ['app-logs'],
+    queryFn: () => api.getLogs(50),
+    refetchInterval: 8_000,
+    staleTime: 4_000,
+  });
+  const { data: features } = useQuery({
+    queryKey: ['features'],
+    queryFn: api.getFeatures,
+    staleTime: 60_000,
+  });
+
+  const [openError, setOpenError] = useState<string | null>(null);
+
+  async function handleOpenFolder() {
+    setOpenError(null);
+    try {
+      await api.openLogsFolder();
+    } catch (e: any) {
+      setOpenError(e?.response?.data?.detail || 'Failed to open folder');
+    }
+  }
+
+  const entries = data?.entries ?? [];
+
+  return (
+    <div className="log-panel">
+      <div className="log-toolbar">
+        <div className="log-toolbar-left">
+          <button className="btn btn-sm" onClick={() => refetch()} disabled={isFetching}>
+            {isFetching ? 'Refreshing…' : 'Refresh'}
+          </button>
+        </div>
+        {features?.open_folder && (
+          <button className="btn btn-sm" onClick={handleOpenFolder}>
+            Open logs folder ↗
+          </button>
+        )}
+      </div>
+      {openError && <div className="error-banner" style={{ marginBottom: 8 }}>{openError}</div>}
+
+      {entries.length === 0 ? (
+        <div className="log-empty">No log entries yet.</div>
+      ) : (
+        <div className="log-list">
+          {entries.map((e, i) => (
+            <div key={i} className={`log-entry log-entry-${(e.level || 'INFO').toLowerCase()}`}>
+              <span className="log-ts">{e.ts}</span>
+              <span className={`log-level-badge ${LEVEL_CLASS[e.level] ?? 'log-level-info'}`}>{e.level}</span>
+              <span className="log-source">{shortName(e.name)}</span>
+              <span className="log-msg">{e.msg}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {entries.length > 0 && (
+        <div className="log-footer">Showing last {entries.length} events · auto-refreshes every 8 s</div>
+      )}
+    </div>
+  );
+}
+
+function shortName(name: string): string {
+  // app.services.ollama_service → ollama_service
+  const parts = name.split('.');
+  return parts[parts.length - 1] ?? name;
 }
 
 function ModelManager({
@@ -130,7 +228,12 @@ function ModelManager({
     setSuccess(null);
     try {
       await fn();
-      setSuccess(`${name}: ${action} done`);
+      if (action === 'delete' && name === defaultModel) {
+        const remaining = models.filter((m) => m.name !== name);
+        onSetDefault(remaining.length > 0 ? remaining[0].name : '');
+      }
+      if (action === 'download') setPullName('');
+      setSuccess(`${name} ${ACTION_PAST[action] ?? action + 'd'}`);
       onRefresh();
       refetchRunning();
     } catch (e: any) {
@@ -163,7 +266,7 @@ function ModelManager({
             {models.map((m) => {
               const isRunning = runningNames.has(m.name);
               const isDefault = m.name === defaultModel;
-              const isBusy = busy?.endsWith(`:${m.name}`);
+              const isBusy = busy === `start:${m.name}` || busy === `stop:${m.name}` || busy === `delete:${m.name}`;
               return (
                 <div key={m.name} className={`mdl-row${isRunning ? ' mdl-running' : ''}${isDefault ? ' mdl-default' : ''}`}>
                   <div className="mdl-info">
@@ -178,24 +281,26 @@ function ModelManager({
                   </div>
                   <div className="mdl-actions">
                     {!isDefault && (
-                      <button className="btn btn-sm" onClick={() => onSetDefault(m.name)}>
+                      <button className="btn btn-sm" disabled={busy !== null}
+                        onClick={() => onSetDefault(m.name)}>
                         Set default
                       </button>
                     )}
                     {isRunning ? (
-                      <button className="btn btn-sm" disabled={!!isBusy}
+                      <button className="btn btn-sm" disabled={isBusy}
                         onClick={() => act('stop', m.name, () => api.unloadModel(m.name))}>
-                        {busy === `stop:${m.name}` ? 'Stopping...' : 'Stop'}
+                        {busy === `stop:${m.name}` ? 'Stopping…' : 'Stop'}
                       </button>
                     ) : (
-                      <button className="btn btn-sm btn-primary" disabled={!!isBusy}
+                      <button className="btn btn-sm btn-primary" disabled={isBusy}
                         onClick={() => act('start', m.name, () => api.loadModel(m.name))}>
-                        {busy === `start:${m.name}` ? 'Starting...' : 'Start'}
+                        {busy === `start:${m.name}` ? 'Starting…' : 'Start'}
                       </button>
                     )}
-                    <button className="btn btn-sm btn-danger" disabled={!!isBusy}
+                    <button className="btn btn-sm btn-danger" disabled={isBusy || isRunning}
+                      title={isRunning ? 'Stop the model before deleting' : undefined}
                       onClick={() => act('delete', m.name, () => api.deleteModel(m.name))}>
-                      {busy === `delete:${m.name}` ? '...' : 'Delete'}
+                      {busy === `delete:${m.name}` ? '…' : 'Delete'}
                     </button>
                   </div>
                 </div>
@@ -212,7 +317,7 @@ function ModelManager({
       </div>
       <div className="mdl-list">
         {SUGGESTED_MODELS
-          .filter((s) => !models.some((m) => m.name.startsWith(s.name)))
+          .filter((s) => !models.some((m) => m.name === s.name || m.name.startsWith(s.name + ':')))
           .map((s) => (
             <div key={s.name} className="mdl-row">
               <div className="mdl-info">
@@ -234,9 +339,9 @@ function ModelManager({
         e.preventDefault();
         if (pullName.trim()) { const c = new AbortController(); abortRef.current = c; act('download', pullName.trim(), () => api.pullModel(pullName.trim(), c.signal)); }
       }}>
-        <input className="input" placeholder="Model name..." value={pullName}
+        <input className="input" placeholder="Model name…" value={pullName}
           onChange={(e) => setPullName(e.target.value)} disabled={busy !== null} />
-        {busy?.startsWith('download:') && busy.endsWith(`:${pullName.trim()}`) ? (
+        {busy === `download:${pullName.trim()}` ? (
           <button className="btn btn-sm btn-danger" type="button" onClick={handleCancel}>Cancel</button>
         ) : (
           <button className="btn btn-sm btn-primary" type="submit"
@@ -248,7 +353,7 @@ function ModelManager({
       {success && <div className="success-banner">{success}</div>}
       {busy?.startsWith('download:') && (
         <div className="mdl-progress">
-          Downloading... this may take a few minutes.
+          Downloading… this may take a few minutes.
           <button className="btn btn-sm btn-danger" onClick={handleCancel} style={{ marginLeft: 8 }}>Cancel</button>
         </div>
       )}

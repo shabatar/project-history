@@ -1,5 +1,6 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
+import { useNavigate } from 'react-router-dom';
 import { useUrlParams } from '../lib/useUrlParams';
 import { useRepositories, useCommits } from '../lib/hooks';
 import * as api from '../lib/api';
@@ -9,11 +10,6 @@ import type { Commit, Repository } from '../types';
 
 type ViewMode = 'merged' | 'side-by-side';
 
-/**
- * Fire-and-forget: parse commits from git for a repo+date range.
- * Tracked by a ref so each combo only fires once.
- * On completion, invalidates the commits query so useCommits refetches.
- */
 function useAutoParseOnce(
   repoId: string | null,
   dateRange: { from: string; to: string },
@@ -172,6 +168,7 @@ export default function CommitExplorer() {
           onCopy={handleCopy}
         />
       )}
+
     </div>
   );
 }
@@ -189,6 +186,13 @@ function MergedView({
   dateRange: { from: string; to: string };
   onCopy: () => void;
 }) {
+  const navigate = useNavigate();
+  const qc = useQueryClient();
+  const [snapshotSaving, setSnapshotSaving] = useState(false);
+  const [snapshotSaved, setSnapshotSaved] = useState(false);
+  const [snapshotError, setSnapshotError] = useState<string | null>(null);
+  const [savedSnapshotPath, setSavedSnapshotPath] = useState<string | null>(null);
+
   const MAX_SLOTS = 6;
   const slots: (string | null)[] = [];
   for (let i = 0; i < MAX_SLOTS; i++) {
@@ -203,7 +207,6 @@ function MergedView({
   useAutoParseOnce(slots[4], dateRange);
   useAutoParseOnce(slots[5], dateRange);
 
-  // Query commits (only loading state that matters)
   const r0 = useCommits(slots[0], dateRange.from, dateRange.to);
   const r1 = useCommits(slots[1], dateRange.from, dateRange.to);
   const r2 = useCommits(slots[2], dateRange.from, dateRange.to);
@@ -223,11 +226,60 @@ function MergedView({
   const loading = results.some((r, i) => i < repoIds.length && r.isLoading);
   const showRepoColumn = repoIds.length > 1;
 
+  async function handleSaveSnapshot() {
+    if (allCommits.length === 0) return;
+    const primaryId = repoIds[0];
+    const primaryName = repoMap.get(primaryId)?.name ?? primaryId;
+    setSnapshotSaving(true);
+    setSnapshotError(null);
+    setSavedSnapshotPath(null);
+    try {
+      const snapshot = await api.saveCommitSnapshot({
+        repository_id: primaryId,
+        repo_name: primaryName,
+        since: dateRange.from,
+        until: dateRange.to,
+        commits: allCommits.slice(0, 2000).map((c) => ({
+          commit_hash: c.commit_hash,
+          author_name: c.author_name,
+          author_email: c.author_email,
+          committed_at: c.committed_at,
+          subject: c.subject,
+        })),
+      });
+      setSnapshotSaved(true);
+      setSavedSnapshotPath(`/reports/commit-snapshot/${snapshot.id}`);
+      qc.invalidateQueries({ queryKey: ['commit-snapshots'] });
+    } catch (e: any) {
+      setSnapshotError(e?.response?.data?.detail || 'Failed to save snapshot');
+    } finally {
+      setSnapshotSaving(false);
+    }
+  }
+
   return (
     <>
       {allCommits.length > 0 && !loading && (
         <div className="ce-actions-row">
-          <span className="ce-count">{allCommits.length} commits</span>
+          <span className="ce-count">{allCommits.length} commit{allCommits.length !== 1 ? 's' : ''}</span>
+          <div className="ce-actions">
+            <button
+              className={`btn btn-sm pf-snapshot-btn${snapshotSaved ? ' pf-snapshot-saved' : ''}`}
+              onClick={snapshotSaved && savedSnapshotPath ? () => navigate(savedSnapshotPath) : handleSaveSnapshot}
+              disabled={snapshotSaving}
+              title={snapshotSaved ? 'Click to open saved snapshot' : 'Save this commit list as a snapshot to Reports'}
+            >
+              {snapshotSaved ? '✓ Saved · View →' : snapshotSaving ? 'Saving…' : '↓ Save as snapshot'}
+            </button>
+            <button
+              className="btn btn-sm btn-primary"
+              onClick={() => navigate('/summaries')}
+              title="Open Reports to generate an AI summary of these commits"
+            >
+              Generate report
+            </button>
+          </div>
+          {snapshotError && <span className="snapshot-save-error">{snapshotError}</span>}
         </div>
       )}
 

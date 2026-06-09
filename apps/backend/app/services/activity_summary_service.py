@@ -119,6 +119,8 @@ _STYLE_INSTRUCTIONS = {
     "manager": _MANAGER_INSTRUCTIONS,
 }
 
+# "custom" style uses a user-supplied prompt — no entry here; handled in _build_prompt.
+
 
 def _fmt_ts(ts_ms: int) -> str:
     return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
@@ -147,11 +149,15 @@ def _build_prompt(
     until: str,
     style: str,
     activities: list[ActivityItem],
+    custom_prompt: str | None = None,
 ) -> str:
     preamble = _SYSTEM_PREAMBLE.format(
         board_name=board_name, since=since, until=until, total=len(activities),
     )
-    instructions = _STYLE_INSTRUCTIONS.get(style, _DETAILED_INSTRUCTIONS)
+    if style == "custom" and custom_prompt:
+        instructions = f"\n{custom_prompt.strip()}\n"
+    else:
+        instructions = _STYLE_INSTRUCTIONS.get(style, _DETAILED_INSTRUCTIONS)
     # Oldest-first so the LLM can follow the timeline
     sorted_items = sorted(activities, key=lambda a: a.timestamp)
     lines = [_format_activity(a) for a in sorted_items]
@@ -212,6 +218,7 @@ async def summarize_activity(
     activities: list[ActivityItem],
     style: str,
     model: str,
+    custom_prompt: str | None = None,
 ) -> tuple[str, bool]:
     """Return (markdown, used_llm). used_llm=False means the deterministic fallback was used."""
     if not activities:
@@ -235,6 +242,7 @@ async def summarize_activity(
 
     prompt = _build_prompt(
         board_name=board_name, since=since, until=until, style=style, activities=capped,
+        custom_prompt=custom_prompt,
     )
 
     try:

@@ -1,20 +1,23 @@
 import { useParams, Link } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import dayjs from 'dayjs';
 import * as api from '../lib/api';
 import { useRepositories } from '../lib/hooks';
 import { renderMarkdown } from '../components/SummaryPanel';
+import { CommentsSection } from '../components/CommentsSection';
+import { EditableTitle } from '../components/EditableTitle';
 import type { SummaryJob } from '../types';
 import type { RepoContext } from '../lib/linkify';
 
 const styleLabels: Record<string, string> = {
-  short: 'Short',
-  detailed: 'Detailed (engineering)',
-  manager: 'Briefly',
+  short: 'Brief',
+  detailed: 'Detailed',
+  custom: 'Custom',
 };
 
 export default function SummaryDetail() {
   const { jobId } = useParams<{ jobId: string }>();
+  const qc = useQueryClient();
 
   const { data: job, isLoading, isError } = useQuery<SummaryJob>({
     queryKey: ['summary', jobId],
@@ -59,7 +62,15 @@ export default function SummaryDetail() {
         <Link to="/summaries" className="detail-back">
           Back to Summaries
         </Link>
-        <h2>{title}</h2>
+        <EditableTitle
+          defaultTitle={title}
+          userLabel={job.user_label}
+          onSave={async (label) => {
+            await api.patchItemLabel('git-summary', job.id, label);
+            qc.invalidateQueries({ queryKey: ['summary', jobId] });
+            qc.invalidateQueries({ queryKey: ['summaries'] });
+          }}
+        />
         {repo && <p className="page-header-sub">Repository: {repo.name}</p>}
       </div>
 
@@ -102,6 +113,10 @@ export default function SummaryDetail() {
           Summary generation failed. Check that Ollama is running and the
           model is available.
         </div>
+      )}
+
+      {job.status === 'completed' && (
+        <CommentsSection summaryType="git" summaryId={job.id} />
       )}
     </div>
   );

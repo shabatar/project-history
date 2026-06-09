@@ -40,6 +40,42 @@ def init_db() -> None:
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE youtrack_configs DROP COLUMN api_token"))
 
+    # Column migrations for existing SQLite DBs
+    if "summary_jobs" in inspector.get_table_names():
+        cols = {c["name"] for c in inspector.get_columns("summary_jobs")}
+        if "custom_prompt" not in cols:
+            logger.info("Adding summary_jobs.custom_prompt column")
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE summary_jobs ADD COLUMN custom_prompt TEXT"))
+
+    if "activity_summaries" in inspector.get_table_names():
+        cols = {c["name"] for c in inspector.get_columns("activity_summaries")}
+        if "custom_prompt" not in cols:
+            logger.info("Adding activity_summaries.custom_prompt column")
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE activity_summaries ADD COLUMN custom_prompt TEXT"))
+        if "user_label" not in cols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE activity_summaries ADD COLUMN user_label VARCHAR(500)"))
+
+    if "summary_jobs" in inspector.get_table_names():
+        cols = {c["name"] for c in inspector.get_columns("summary_jobs")}
+        if "user_label" not in cols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE summary_jobs ADD COLUMN user_label VARCHAR(500)"))
+
+    if "activity_snapshots" in inspector.get_table_names():
+        cols = {c["name"] for c in inspector.get_columns("activity_snapshots")}
+        if "user_label" not in cols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE activity_snapshots ADD COLUMN user_label VARCHAR(500)"))
+
+    if "commit_snapshots" in inspector.get_table_names():
+        cols = {c["name"] for c in inspector.get_columns("commit_snapshots")}
+        if "user_label" not in cols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE commit_snapshots ADD COLUMN user_label VARCHAR(500)"))
+
     # Owner-only permissions for data and repos directories
     for d in [settings.data_dir, settings.repos_dir]:
         if d.is_dir():

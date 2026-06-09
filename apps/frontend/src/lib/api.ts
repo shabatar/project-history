@@ -105,6 +105,7 @@ export async function createSummary(
     base_branch?: string;
     model_name?: string;
     summary_style?: SummaryStyle;
+    custom_prompt?: string;
   },
   signal?: AbortSignal,
 ): Promise<SummaryJob> {
@@ -124,6 +125,10 @@ export async function listSummaries(
 export async function getSummary(jobId: string): Promise<SummaryJob> {
   const { data } = await client.get<SummaryJob>(`/summaries/${jobId}`);
   return data;
+}
+
+export async function deleteSummary(jobId: string): Promise<void> {
+  await client.delete(`/summaries/${jobId}`);
 }
 
 export interface RunningModel {
@@ -151,7 +156,7 @@ export async function deleteModel(name: string): Promise<void> {
 }
 
 export async function pullModel(name: string, signal?: AbortSignal): Promise<void> {
-  await client.post('/summaries/models/pull', { name }, { timeout: 600_000, signal });
+  await client.post('/summaries/models/pull', { name }, { timeout: 1_800_000, signal });
 }
 
 export async function listOllamaModels(): Promise<OllamaModel[]> {
@@ -503,7 +508,8 @@ export async function summarizeProjectActivity(
   input: {
     since: string;
     until: string;
-    summary_style?: 'short' | 'detailed' | 'manager';
+    summary_style?: 'short' | 'detailed' | 'custom';
+    custom_prompt?: string;
     model_name?: string;
   },
   signal?: AbortSignal,
@@ -525,7 +531,8 @@ export type SummaryStreamEvent =
 type SummarizeInput = {
   since: string;
   until: string;
-  summary_style?: 'short' | 'detailed' | 'manager';
+  summary_style?: 'short' | 'detailed' | 'custom';
+  custom_prompt?: string;
   model_name?: string;
 };
 
@@ -568,12 +575,33 @@ export interface ActivitySummaryRecord {
   source_name: string;
   since: string;
   until: string;
-  summary_style: 'short' | 'detailed' | 'manager';
+  summary_style: 'short' | 'detailed' | 'custom';
+  custom_prompt?: string;
   model_name: string;
   activity_count: number;
   summary_markdown: string;
   used_llm: boolean;
+  user_label: string | null;
   generated_at: string;
+  comment_count: number;
+}
+
+export interface SummaryComment {
+  id: string;
+  summary_type: 'git' | 'activity';
+  summary_id: string;
+  comment_type: 'note' | 'request';
+  user_content: string;
+  ai_response: string | null;
+  ai_status: 'none' | 'pending' | 'done' | 'error';
+  ai_error: string | null;
+  model_name: string | null;
+  created_at: string;
+}
+
+export async function getActivitySummary(id: string): Promise<ActivitySummaryRecord> {
+  const { data } = await client.get<ActivitySummaryRecord>(`/youtrack/activity-summaries/${id}`);
+  return data;
 }
 
 export async function listActivitySummaries(limit = 100): Promise<ActivitySummaryRecord[]> {
@@ -592,7 +620,8 @@ export async function summarizeBoardActivity(
   input: {
     since: string;
     until: string;
-    summary_style?: 'short' | 'detailed' | 'manager';
+    summary_style?: 'short' | 'detailed' | 'custom';
+    custom_prompt?: string;
     model_name?: string;
   },
   signal?: AbortSignal,
@@ -614,6 +643,177 @@ export interface Features {
 
 export async function getFeatures(): Promise<Features> {
   const { data } = await client.get<Features>('/features');
+  return data;
+}
+
+// ── Logs ──
+
+export interface LogEntry {
+  ts: string;
+  level: string;
+  name: string;
+  msg: string;
+}
+
+export interface LogsResponse {
+  entries: LogEntry[];
+}
+
+export async function getLogs(limit = 50): Promise<LogsResponse> {
+  const { data } = await client.get<LogsResponse>('/logs', { params: { limit } });
+  return data;
+}
+
+export async function openLogsFolder(): Promise<void> {
+  await client.post('/logs/open-folder');
+}
+
+// ── Summary Comments ──
+
+export type CommentSummaryType = 'git' | 'activity' | 'activity-snapshot' | 'git-snapshot';
+
+function commentBase(summaryType: CommentSummaryType, summaryId: string): string {
+  if (summaryType === 'git') return `/summaries/${summaryId}/comments`;
+  if (summaryType === 'activity') return `/youtrack/activity-summaries/${summaryId}/comments`;
+  if (summaryType === 'git-snapshot') return `/commit-snapshots/${summaryId}/comments`;
+  return `/youtrack/activity-snapshots/${summaryId}/comments`;
+}
+
+export async function listComments(
+  summaryType: CommentSummaryType,
+  summaryId: string,
+): Promise<SummaryComment[]> {
+  const { data } = await client.get<SummaryComment[]>(commentBase(summaryType, summaryId));
+  return data;
+}
+
+export async function createComment(
+  summaryType: CommentSummaryType,
+  summaryId: string,
+  body: { comment_type: 'note' | 'request'; user_content: string },
+): Promise<SummaryComment> {
+  const { data } = await client.post<SummaryComment>(commentBase(summaryType, summaryId), body);
+  return data;
+}
+
+export async function deleteComment(
+  summaryType: CommentSummaryType,
+  summaryId: string,
+  commentId: string,
+): Promise<void> {
+  await client.delete(`${commentBase(summaryType, summaryId)}/${commentId}`);
+}
+
+export type CommentGenerateEvent =
+  | { type: 'status'; phase: string; model?: string }
+  | { type: 'done'; reply: string; comment_id: string }
+  | { type: 'error'; detail: string };
+
+export async function streamGenerateReply(
+  summaryType: CommentSummaryType,
+  summaryId: string,
+  commentId: string,
+  opts: {
+    onEvent: (e: CommentGenerateEvent) => void;
+    signal?: AbortSignal;
+  },
+): Promise<void> {
+  const url = `${commentBase(summaryType, summaryId)}/${commentId}/generate`;
+  return readNdjsonStream<CommentGenerateEvent>(url, {}, { ...opts, tag: '[comment-generate]' });
+}
+
+// ── Snapshots ──
+
+export interface ActivitySnapshot {
+  id: string;
+  source_type: 'board' | 'project';
+  source_id: string;
+  source_name: string;
+  since: string;
+  until: string;
+  activity_count: number;
+  user_label: string | null;
+  created_at: string;
+}
+
+export interface CommitSnapshot {
+  id: string;
+  repository_id: string;
+  repo_name: string;
+  since: string | null;
+  until: string | null;
+  branch: string | null;
+  base_branch: string | null;
+  commit_count: number;
+  user_label: string | null;
+  created_at: string;
+}
+
+export async function saveActivitySnapshot(body: {
+  source_type: 'board' | 'project';
+  source_id: string;
+  source_name: string;
+  since: string;
+  until: string;
+  activities: ActivityItem[];
+}): Promise<ActivitySnapshot> {
+  const { data } = await client.post<ActivitySnapshot>('/youtrack/activity-snapshots', body);
+  return data;
+}
+
+export async function listActivitySnapshots(limit = 100): Promise<ActivitySnapshot[]> {
+  const { data } = await client.get<ActivitySnapshot[]>('/youtrack/activity-snapshots', { params: { limit } });
+  return data;
+}
+
+export async function deleteActivitySnapshot(id: string): Promise<void> {
+  await client.delete(`/youtrack/activity-snapshots/${id}`);
+}
+
+export async function getActivitySnapshotRaw(id: string): Promise<{ activities: ActivityItem[] }> {
+  const { data } = await client.get<{ activities: ActivityItem[] }>(`/youtrack/activity-snapshots/${id}/raw`);
+  return data;
+}
+
+export async function saveCommitSnapshot(body: {
+  repository_id: string;
+  repo_name: string;
+  since?: string;
+  until?: string;
+  branch?: string;
+  base_branch?: string;
+  commits: Array<{ commit_hash: string; author_name: string; author_email: string; committed_at: string; subject: string }>;
+}): Promise<CommitSnapshot> {
+  const { data } = await client.post<CommitSnapshot>('/commit-snapshots', body);
+  return data;
+}
+
+export async function listCommitSnapshots(repositoryId?: string, limit = 100): Promise<CommitSnapshot[]> {
+  const { data } = await client.get<CommitSnapshot[]>('/commit-snapshots', {
+    params: { repository_id: repositoryId, limit },
+  });
+  return data;
+}
+
+export async function deleteCommitSnapshot(id: string): Promise<void> {
+  await client.delete(`/commit-snapshots/${id}`);
+}
+
+export async function patchItemLabel(
+  type: 'git-summary' | 'activity-summary' | 'activity-snapshot' | 'git-snapshot',
+  id: string,
+  userLabel: string | null,
+): Promise<void> {
+  const url =
+    type === 'git-summary' ? `/summaries/${id}/label` :
+    type === 'activity-summary' ? `/youtrack/activity-summaries/${id}/label` :
+    type === 'activity-snapshot' ? `/youtrack/activity-snapshots/${id}/label` :
+    `/commit-snapshots/${id}/label`;
+  await client.patch(url, { user_label: userLabel });
+}
+
+export async function getCommitSnapshotRaw(id: string): Promise<{ commits: Array<{ commit_hash: string; author_name: string; author_email: string; committed_at: string; subject: string }> }> {
+  const { data } = await client.get(`/commit-snapshots/${id}/raw`);
   return data;
 }
 

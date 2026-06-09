@@ -1,14 +1,15 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import dayjs from 'dayjs';
 import * as api from '../lib/api';
-import type { BoardSyncResult, IssueChange, ActivityItem } from '../lib/api';
-import { renderMarkdown } from '../components/SummaryPanel';
-import { userUrl, baseFromUrl } from '../lib/youtrackLinks';
+import type { BoardSyncResult, IssueChange } from '../lib/api';
+import ActivityFlow from './ActivityFlow';
+import CommitWorkbench from './CommitWorkbench';
 
-type BoardTab = 'issues' | 'activity';
+type ActivitySection = 'boards' | 'projects' | 'commits';
 
 type ComparePreset = 'last-sync' | 'yesterday' | 'last-week' | 'last-month' | 'last-3-months' | 'custom';
+type BoardTab = 'issues' | 'activity';
 
 const PRESET_LABELS: Record<ComparePreset, string> = {
   'last-sync': 'Last sync',
@@ -136,22 +137,50 @@ export default function Boards() {
   }
 
   const [expandedBoardId, setExpandedBoardId] = useState<string | null>(null);
-
-  if (configLoading) {
-    return (
-      <div className="page">
-        <div className="empty-state">Loading...</div>
-      </div>
-    );
-  }
+  const [section, setSection] = useState<ActivitySection>('boards');
 
   return (
-    <div className="page">
+    <div className="page act-page">
       <div className="page-header">
-        <h2>Boards</h2>
+        <h2>Activity</h2>
       </div>
 
-      {!config ? (
+      {/* Section tabs */}
+      <div className="act-section-tabs">
+        <button
+          className={`act-section-tab${section === 'boards' ? ' active' : ''}`}
+          onClick={() => setSection('boards')}
+        >
+          Boards
+        </button>
+        <button
+          className={`act-section-tab${section === 'projects' ? ' active' : ''}`}
+          onClick={() => setSection('projects')}
+        >
+          Projects
+        </button>
+        <button
+          className={`act-section-tab${section === 'commits' ? ' active' : ''}`}
+          onClick={() => setSection('commits')}
+        >
+          Commits
+        </button>
+      </div>
+
+      {/* Keep-alive: mount all sections, show only the active one */}
+      <div style={{ display: section === 'commits' ? 'block' : 'none' }}>
+        <CommitWorkbench />
+      </div>
+
+      {section === 'projects' && (
+        <ActivityFlow fixedScope="project" />
+      )}
+
+      {section === 'boards' && (<>
+
+      {configLoading ? (
+        <div className="empty-state">Loading...</div>
+      ) : !config ? (
         <div className="yt-config-setup">
           <p className="form-hint" style={{ marginBottom: 8 }}>
             Enter your YouTrack base URL and API token. The token is encrypted at rest and never returned to the UI.
@@ -259,9 +288,7 @@ export default function Boards() {
                 </button>
                 <button
                   className="btn btn-sm"
-                  onClick={() =>
-                    testConnMut.mutate({ base_url: config.base_url })
-                  }
+                  onClick={() => testConnMut.mutate({ base_url: config.base_url })}
                   disabled={!config.token_configured || testConnMut.isPending}
                   title={
                     !config.token_configured
@@ -407,11 +434,12 @@ export default function Boards() {
         ))}
       </div>
 
-      {config && boards.length === 0 && (
+      {config && boards.length === 0 && !configLoading && (
         <div className="empty-state">
           <p>No boards tracked yet. Add a YouTrack agile board URL above.</p>
         </div>
       )}
+      </>)}
     </div>
   );
 }
@@ -442,6 +470,11 @@ function BoardCard({
   });
 
   const changes = syncResult?.changes ?? [];
+  const [changesExpanded, setChangesExpanded] = useState(false);
+
+  useEffect(() => {
+    setChangesExpanded(syncResult != null && syncResult.changes.length > 0);
+  }, [syncResult]);
 
   return (
     <div className="yt-board-card">
@@ -460,216 +493,73 @@ function BoardCard({
 
       {syncResult && (
         <div className="yt-changes">
-          <div className="yt-changes-title">
-            {changes.length} change{changes.length !== 1 ? 's' : ''} detected
-            <span className="yt-baseline-note">
-              {' · '}
-              {syncResult.baseline_synced_at
-                ? `compared to ${syncResult.since ? dayjs(syncResult.since).format('MMM D') : dayjs(syncResult.baseline_synced_at).fromNow()} (${dayjs(syncResult.baseline_synced_at).format('MMM D, HH:mm')})`
-                : 'no earlier baseline — every issue is counted as new'}
+          <div
+            className="yt-changes-title"
+            onClick={() => changes.length > 0 && setChangesExpanded((v) => !v)}
+            style={{ cursor: changes.length > 0 ? 'pointer' : 'default' }}
+          >
+            <span>
+              {changes.length} change{changes.length !== 1 ? 's' : ''} detected
+              <span className="yt-baseline-note">
+                {' · '}
+                {syncResult.baseline_synced_at
+                  ? `compared to ${syncResult.since ? dayjs(syncResult.since).format('MMM D') : dayjs(syncResult.baseline_synced_at).fromNow()} (${dayjs(syncResult.baseline_synced_at).format('MMM D, HH:mm')})`
+                  : 'no earlier baseline — every issue is counted as new'}
+              </span>
             </span>
+            {changes.length > 0 && (
+              <span className="yt-changes-toggle">{changesExpanded ? '▲' : '▼'}</span>
+            )}
           </div>
-          {changes.map((c, i) => <ChangeRow key={i} change={c} baseUrl={board.board_url} />)}
+          {changesExpanded && changes.map((c, i) => <ChangeRow key={i} change={c} baseUrl={board.board_url} />)}
         </div>
       )}
 
       {expanded && (
         <div className="yt-board-body">
           <div className="yt-tab-bar">
-            <button className={`yt-tab${tab === 'issues' ? ' active' : ''}`} onClick={() => setTab('issues')}>Issues</button>
-            <button className={`yt-tab${tab === 'activity' ? ' active' : ''}`} onClick={() => setTab('activity')}>Activity</button>
+            <button
+              className={`yt-tab${tab === 'issues' ? ' active' : ''}`}
+              onClick={() => setTab('issues')}
+            >
+              Issues
+            </button>
+            <button
+              className={`yt-tab${tab === 'activity' ? ' active' : ''}`}
+              onClick={() => setTab('activity')}
+            >
+              Activity
+            </button>
           </div>
 
-          {tab === 'issues' && board.last_synced_at && (
-            <div className="yt-issues">
-              <div className="yt-issues-header">{issues.length} issues on board</div>
-              <div className="yt-issues-list">
-                {issues.map((iss) => (
-                  <div key={iss.id} className="yt-issue-row">
-                    <a href={issueUrl(board.board_url, iss.issue_id)} target="_blank" rel="noopener" className="yt-issue-id">{iss.issue_id}</a>
-                    <span className="yt-issue-summary">{iss.summary}</span>
-                    {iss.state && <span className="yt-issue-state">{iss.state}</span>}
-                    {iss.assignee && <span className="yt-issue-assignee">{iss.assignee}</span>}
-                  </div>
-                ))}
+          {tab === 'issues' && (
+            !board.last_synced_at ? (
+              <div className="yt-issues">
+                <div className="yt-issues-header">Not synced yet — click Sync to load issues.</div>
               </div>
-            </div>
+            ) : (
+              <div className="yt-issues">
+                <div className="yt-issues-header">{issues.length} issues on board</div>
+                <div className="yt-issues-list">
+                  {issues.map((iss) => (
+                    <div key={iss.id} className="yt-issue-row">
+                      <a href={issueUrl(board.board_url, iss.issue_id)} target="_blank" rel="noopener" className="yt-issue-id">{iss.issue_id}</a>
+                      <span className="yt-issue-summary">{iss.summary}</span>
+                      {iss.state && <span className="yt-issue-state">{iss.state}</span>}
+                      {iss.assignee && <span className="yt-issue-assignee">{iss.assignee}</span>}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )
           )}
 
           {tab === 'activity' && (
-            <ActivityPanel boardId={board.id} boardUrl={board.board_url} />
+            <div className="yt-board-activity">
+              <ActivityFlow fixedBoard={board} />
+            </div>
           )}
         </div>
-      )}
-    </div>
-  );
-}
-
-function ActivityPanel({ boardId, boardUrl }: { boardId: string; boardUrl: string }) {
-  const [since, setSince] = useState(() => dayjs().subtract(7, 'day').format('YYYY-MM-DD'));
-  const [until, setUntil] = useState(() => dayjs().format('YYYY-MM-DD'));
-  const [activities, setActivities] = useState<ActivityItem[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [loaded, setLoaded] = useState(false);
-
-  const [summaryStyle, setSummaryStyle] = useState<'short' | 'detailed' | 'manager'>('detailed');
-  const [summary, setSummary] = useState<api.ActivitySummaryResponse | null>(null);
-  const [summarizing, setSummarizing] = useState(false);
-  const [summaryError, setSummaryError] = useState<string | null>(null);
-  const mountedRef = useRef(true);
-
-  useEffect(() => {
-    return () => { mountedRef.current = false; };
-  }, []);
-
-  async function handleFetch() {
-    setLoading(true);
-    setError(null);
-    setSummary(null);
-    setSummaryError(null);
-    try {
-      const resp = await api.fetchBoardActivity(boardId, since, until);
-      if (!mountedRef.current) return;
-      setActivities(resp.activities);
-      setLoaded(true);
-    } catch (e: any) {
-      if (!mountedRef.current) return;
-      setError(e?.response?.data?.detail || 'Failed to fetch activity');
-    }
-    if (mountedRef.current) setLoading(false);
-  }
-
-  async function handleSummarize() {
-    setSummarizing(true);
-    setSummaryError(null);
-    try {
-      const resp = await api.summarizeBoardActivity(boardId, {
-        since,
-        until,
-        summary_style: summaryStyle,
-      });
-      if (!mountedRef.current) return;
-      setSummary(resp);
-    } catch (e: any) {
-      if (!mountedRef.current) return;
-      setSummaryError(e?.response?.data?.detail || 'Failed to summarize activity');
-    }
-    if (mountedRef.current) setSummarizing(false);
-  }
-
-  // Group activities by day
-  const groups = groupActivitiesByDay(activities);
-
-  return (
-    <div className="yt-activity">
-      <div className="yt-activity-toolbar">
-        <label className="date-range-field">
-          <span className="date-range-label">From</span>
-          <input type="date" className="input" value={since} onChange={(e) => { if (e.target.value) setSince(e.target.value); }} />
-        </label>
-        <label className="date-range-field">
-          <span className="date-range-label">To</span>
-          <input type="date" className="input" value={until} onChange={(e) => { if (e.target.value) setUntil(e.target.value); }} />
-        </label>
-        <button className="btn btn-sm btn-primary" onClick={handleFetch} disabled={loading}>
-          {loading ? 'Loading...' : 'Fetch Activity'}
-        </button>
-        {loaded && <span className="ce-count">{activities.length} events</span>}
-
-        <div className="yt-summary-controls">
-          <label className="date-range-field">
-            <span className="date-range-label">Style</span>
-            <select
-              className="input"
-              value={summaryStyle}
-              onChange={(e) => setSummaryStyle(e.target.value as 'short' | 'detailed' | 'manager')}
-              disabled={summarizing}
-            >
-              <option value="short">Short</option>
-              <option value="detailed">Detailed</option>
-              <option value="manager">Manager</option>
-            </select>
-          </label>
-          <button
-            className="btn btn-sm"
-            onClick={handleSummarize}
-            disabled={!loaded || activities.length === 0 || summarizing}
-            title={
-              !loaded
-                ? 'Fetch activity first'
-                : activities.length === 0
-                  ? 'No activity to summarize'
-                  : 'Generate an AI summary of this activity'
-            }
-          >
-            {summarizing ? 'Summarizing...' : 'Summarize with AI'}
-          </button>
-        </div>
-      </div>
-
-      {error && <div className="error-banner">{error}</div>}
-      {summaryError && <div className="error-banner">{summaryError}</div>}
-
-      {summary && <ActivitySummaryCard summary={summary} />}
-
-      {loaded && activities.length === 0 && (
-        <div className="yt-activity-empty">No activity in this date range.</div>
-      )}
-
-      {groups.map((group) => (
-        <div key={group.day} className="yt-activity-day">
-          <div className="yt-activity-day-header">{dayjs(group.day).format('ddd, MMM D')}</div>
-          {group.items.map((item, i) => (
-            <ActivityRow key={i} item={item} boardUrl={boardUrl} />
-          ))}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function ActivityRow({ item, boardUrl }: { item: ActivityItem; boardUrl: string }) {
-  const time = dayjs(item.timestamp).format('HH:mm');
-  const typeClass = `yt-act-${item.activity_type}`;
-
-  let description = '';
-  switch (item.activity_type) {
-    case 'created':
-      description = 'created';
-      break;
-    case 'resolved':
-      description = 'resolved';
-      break;
-    case 'comment':
-      description = 'commented';
-      break;
-    case 'field_change':
-      if (item.old_value && item.new_value) {
-        description = `${item.field}: ${item.old_value} → ${item.new_value}`;
-      } else if (item.new_value) {
-        description = `${item.field} set to ${item.new_value}`;
-      } else if (item.old_value) {
-        description = `${item.field} cleared (was ${item.old_value})`;
-      } else {
-        description = `${item.field} changed`;
-      }
-      break;
-  }
-
-  return (
-    <div className={`yt-activity-row ${typeClass}`}>
-      <span className="yt-activity-time">{time}</span>
-      <a href={issueUrl(boardUrl, item.issue_id)} target="_blank" rel="noopener" className="yt-issue-id">{item.issue_id}</a>
-      <span className="yt-activity-desc">{description}</span>
-      {item.author && (() => {
-        const href = userUrl(baseFromUrl(boardUrl), item.author_login);
-        return href
-          ? <a href={href} target="_blank" rel="noopener" className="yt-activity-author">{item.author}</a>
-          : <span className="yt-activity-author">{item.author}</span>;
-      })()}
-      {item.comment_text && (
-        <div className="yt-activity-comment">{item.comment_text}</div>
       )}
     </div>
   );
@@ -686,38 +576,6 @@ function ChangeRow({ change, baseUrl }: { change: IssueChange; baseUrl: string }
       {change.old_state && change.new_state && <span className="yt-change-detail">{change.old_state} → {change.new_state}</span>}
       {change.old_assignee !== null && change.new_assignee !== null && <span className="yt-change-detail">{change.old_assignee || 'unassigned'} → {change.new_assignee || 'unassigned'}</span>}
     </div>
-  );
-}
-
-function ActivitySummaryCard({ summary }: { summary: api.ActivitySummaryResponse }) {
-  // Issue-id refs (e.g. PROJ-123) are auto-linked by the globally-configured
-  // issue tracker (see Settings → Issue Tracker / main.tsx), so we pass null
-  // for repoContext.
-  return (
-    <article className="yt-summary-card">
-      <header className="yt-summary-header">
-        <div className="yt-summary-meta">
-          <span className={`yt-summary-tag yt-summary-tag-${summary.summary_style}`}>
-            {summary.summary_style}
-          </span>
-          <span className="yt-summary-sub">
-            {summary.activity_count} event{summary.activity_count !== 1 ? 's' : ''} ·{' '}
-            {summary.since} → {summary.until} · {summary.model_name}
-          </span>
-        </div>
-        {!summary.used_llm && (
-          <span className="yt-summary-fallback" title="Ollama was unreachable — deterministic fallback summary">
-            fallback
-          </span>
-        )}
-      </header>
-      <div
-        className="summary-markdown"
-        dangerouslySetInnerHTML={{
-          __html: renderMarkdown(summary.summary_markdown, null),
-        }}
-      />
-    </article>
   );
 }
 
@@ -796,17 +654,4 @@ function issueUrl(boardUrl: string, issueId: string): string {
   const m = boardUrl.match(/^(https?:\/\/[^/]+)/);
   if (m) return `${m[1]}/issue/${issueId}`;
   return `#${issueId}`;
-}
-
-function groupActivitiesByDay(items: ActivityItem[]): { day: string; items: ActivityItem[] }[] {
-  const map = new Map<string, ActivityItem[]>();
-  for (const item of items) {
-    const day = dayjs(item.timestamp).format('YYYY-MM-DD');
-    const arr = map.get(day);
-    if (arr) arr.push(item);
-    else map.set(day, [item]);
-  }
-  return Array.from(map.entries())
-    .sort((a, b) => b[0].localeCompare(a[0]))
-    .map(([day, items]) => ({ day, items }));
 }

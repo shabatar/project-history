@@ -35,14 +35,19 @@ export interface FlowToolbarProps {
   hasSelection: boolean;
   onFetch: () => void;
   onCancel: () => void;
+
+  /** When true, suppresses the entity picker row (board already determined by context). */
+  hidePicker?: boolean;
 }
 
 export function FlowToolbar(props: FlowToolbarProps) {
   return (
     <div className="pf-toolbar">
-      {props.scope === 'project'
-        ? <ProjectPicker {...props} />
-        : <BoardPicker {...props} />}
+      {!props.hidePicker && (
+        props.scope === 'project'
+          ? <ProjectPicker {...props} />
+          : <BoardPicker {...props} />
+      )}
       <RangeRow {...props} />
     </div>
   );
@@ -200,7 +205,7 @@ function RangeRow({
               : (scope === 'board' ? 'Pick a board first' : 'Pick a project first')
           }
         >
-          Fetch
+          Load activity
         </button>
       )}
     </div>

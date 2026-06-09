@@ -7,25 +7,30 @@ import threading
 from typing import Callable
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db
 from app.database import SessionLocal
-from app.models import ActivitySummary, YouTrackBoard, YouTrackConfig, YouTrackIssueSnapshot
+from app.models import ActivitySnapshot, ActivitySummary, SummaryComment, YouTrackBoard, YouTrackConfig, YouTrackIssueSnapshot
 from app.schemas import (
     ActivityItem,
     ActivityRequest,
+    ActivitySnapshotCreate,
+    ActivitySnapshotRead,
     ActivitySummaryRead,
     ActivitySummaryRequest,
     ActivitySummaryResponse,
     BoardActivityResponse,
     BoardSyncRequest,
     BoardSyncResult,
+    ItemLabelUpdate,
     ProjectActivityResponse,
     ProjectActivitySummaryResponse,
+    SummaryCommentCreate,
+    SummaryCommentRead,
     YouTrackBoardAdd,
     YouTrackBoardRead,
     YouTrackConfigCreate,
@@ -35,7 +40,7 @@ from app.schemas import (
     YouTrackTestRequest,
     YouTrackTestResponse,
 )
-from app.services import activity_summary_service
+from app.services import activity_summary_service, comment_service
 from app.services.crypto import encrypt
 from app.services.youtrack_service import (
     extract_base_url,
@@ -243,6 +248,7 @@ def _persist_activity_summary(
     activity_count: int,
     markdown: str,
     used_llm: bool,
+    custom_prompt: str | None = None,
 ) -> str:
     """Persist a generated activity summary in its own short-lived session."""
     db = SessionLocal()
@@ -254,6 +260,7 @@ def _persist_activity_summary(
             since=since,
             until=until,
             summary_style=style,
+            custom_prompt=custom_prompt,
             model_name=model,
             activity_count=activity_count,
             summary_markdown=markdown,
@@ -892,6 +899,7 @@ def _stream_summarize(
                 stop.is_set, on_progress,
             )
             await queue.put({"type": "status", "phase": "generating", "model": model, "activity_count": len(activities)})
+            custom_prompt = body.custom_prompt if style == "custom" else None
             markdown, used_llm = await activity_summary_service.summarize_activity(
                 board_name=display_name,
                 since=body.since,
@@ -899,6 +907,7 @@ def _stream_summarize(
                 activities=activities,
                 style=style,
                 model=model,
+                custom_prompt=custom_prompt,
             )
             response = build_response(activities, markdown, model, used_llm)
             response["generated_at"] = _dt.now(_tz.utc).isoformat()
@@ -909,12 +918,15 @@ def _stream_summarize(
             response["used_llm"] = used_llm
             response["since"] = body.since
             response["until"] = body.until
+            if custom_prompt:
+                response["custom_prompt"] = custom_prompt
             saved_id = _persist_activity_summary(
                 source_type=persist_source_type,
                 source_id=persist_source_id,
                 source_name=display_name,
                 since=body.since, until=body.until, style=style, model=model,
                 activity_count=len(activities), markdown=markdown, used_llm=used_llm,
+                custom_prompt=custom_prompt,
             )
             if saved_id:
                 response["id"] = saved_id
@@ -955,6 +967,153 @@ def _stream_summarize(
             "X-Accel-Buffering": "no",
             "Connection": "keep-alive",
         },
+    )
+
+
+# ── Activity Snapshots ──
+
+@router.post("/activity-snapshots", response_model=ActivitySnapshotRead, status_code=201)
+def create_activity_snapshot(body: ActivitySnapshotCreate, db: Session = Depends(get_db)):
+    raw = json.dumps([a.model_dump() for a in body.activities], default=str)
+    snap = ActivitySnapshot(
+        source_type=body.source_type,
+        source_id=body.source_id,
+        source_name=body.source_name,
+        since=body.since,
+        until=body.until,
+        activity_count=len(body.activities),
+        raw_json=raw,
+    )
+    db.add(snap)
+    db.commit()
+    db.refresh(snap)
+    return snap
+
+
+@router.get("/activity-snapshots", response_model=list[ActivitySnapshotRead])
+def list_activity_snapshots(
+    limit: int = Query(100, le=500),
+    db: Session = Depends(get_db),
+):
+    return (
+        db.query(ActivitySnapshot)
+        .order_by(ActivitySnapshot.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+
+@router.get("/activity-snapshots/{snapshot_id}/raw")
+def get_activity_snapshot_raw(snapshot_id: str, db: Session = Depends(get_db)):
+    snap = db.get(ActivitySnapshot, snapshot_id)
+    if not snap:
+        raise HTTPException(404, "Activity snapshot not found")
+    return {"activities": json.loads(snap.raw_json)}
+
+
+@router.delete("/activity-snapshots/{snapshot_id}", status_code=204)
+def delete_activity_snapshot(snapshot_id: str, db: Session = Depends(get_db)):
+    snap = db.get(ActivitySnapshot, snapshot_id)
+    if not snap:
+        raise HTTPException(404, "Activity snapshot not found")
+    db.delete(snap)
+    db.commit()
+
+
+@router.patch("/activity-snapshots/{snapshot_id}/label", response_model=ActivitySnapshotRead)
+def update_activity_snapshot_label(snapshot_id: str, body: ItemLabelUpdate, db: Session = Depends(get_db)):
+    snap = db.get(ActivitySnapshot, snapshot_id)
+    if not snap:
+        raise HTTPException(404, "Activity snapshot not found")
+    snap.user_label = body.user_label.strip() if body.user_label else None
+    db.commit()
+    db.refresh(snap)
+    return snap
+
+
+# ── Activity Snapshot Comments ──
+
+@router.get("/activity-snapshots/{snapshot_id}/comments", response_model=list[SummaryCommentRead])
+def list_snapshot_comments(snapshot_id: str, db: Session = Depends(get_db)):
+    if not db.get(ActivitySnapshot, snapshot_id):
+        raise HTTPException(404, "Activity snapshot not found")
+    return comment_service.list_comments(db, "activity-snapshot", snapshot_id)
+
+
+@router.post(
+    "/activity-snapshots/{snapshot_id}/comments",
+    response_model=SummaryCommentRead,
+    status_code=201,
+)
+def create_snapshot_comment(
+    snapshot_id: str,
+    body: SummaryCommentCreate,
+    db: Session = Depends(get_db),
+):
+    if not db.get(ActivitySnapshot, snapshot_id):
+        raise HTTPException(404, "Activity snapshot not found")
+    return comment_service.create_comment(
+        db,
+        summary_type="activity-snapshot",
+        summary_id=snapshot_id,
+        comment_type=body.comment_type,
+        user_content=body.user_content,
+    )
+
+
+@router.delete("/activity-snapshots/{snapshot_id}/comments/{comment_id}", status_code=204)
+def delete_snapshot_comment(
+    snapshot_id: str, comment_id: str, db: Session = Depends(get_db)
+):
+    c = comment_service.get_comment(db, comment_id)
+    if not c or c.summary_type != "activity-snapshot" or c.summary_id != snapshot_id:
+        raise HTTPException(404, "Comment not found")
+    comment_service.delete_comment(db, comment_id)
+
+
+@router.post("/activity-snapshots/{snapshot_id}/comments/{comment_id}/generate")
+async def generate_snapshot_comment_reply(
+    snapshot_id: str,
+    comment_id: str,
+    db: Session = Depends(get_db),
+):
+    snap = db.get(ActivitySnapshot, snapshot_id)
+    if not snap:
+        raise HTTPException(404, "Activity snapshot not found")
+
+    c = comment_service.get_comment(db, comment_id)
+    if not c or c.summary_type != "activity-snapshot" or c.summary_id != snapshot_id:
+        raise HTTPException(404, "Comment not found")
+    if c.comment_type != "request":
+        raise HTTPException(400, "Only 'request' comments can generate AI replies")
+
+    try:
+        events = json.loads(snap.raw_json)
+    except Exception:
+        events = []
+
+    MAX_EVENTS = 200
+    lines = [
+        f"Activity snapshot: {snap.source_name} | {snap.since} → {snap.until} | {snap.activity_count} events"
+    ]
+    for ev in events[:MAX_EVENTS]:
+        if isinstance(ev, dict):
+            parts = [
+                f"{k}={ev[k]}"
+                for k in ("timestamp", "author", "issue_id", "type", "field", "old_value", "new_value", "text")
+                if ev.get(k)
+            ]
+            lines.append("  " + " | ".join(parts))
+    if len(events) > MAX_EVENTS:
+        lines.append(f"  ... ({len(events) - MAX_EVENTS} more events not shown)")
+
+    return await comment_service.stream_reply(
+        db,
+        summary_type="activity-snapshot",
+        parent_id=snapshot_id,
+        comment=c,
+        context_markdown="\n".join(lines),
+        model=settings.default_model,
     )
 
 
@@ -1048,17 +1207,38 @@ async def stream_summarize_board_activity(
 
 # ── Persisted activity summaries (read + list + delete) ──
 
+def _enrich_with_comment_count(rows: list[ActivitySummary], db: Session) -> list[dict]:
+    """Add comment_count to each ActivitySummary row for the list response."""
+    from sqlalchemy import func
+    ids = [r.id for r in rows]
+    if not ids:
+        return []
+    counts = dict(
+        db.query(SummaryComment.summary_id, func.count(SummaryComment.id))
+        .filter(SummaryComment.summary_type == "activity", SummaryComment.summary_id.in_(ids))
+        .group_by(SummaryComment.summary_id)
+        .all()
+    )
+    result = []
+    for r in rows:
+        d = ActivitySummaryRead.model_validate(r).model_dump()
+        d["comment_count"] = counts.get(r.id, 0)
+        result.append(d)
+    return result
+
+
 @router.get("/activity-summaries", response_model=list[ActivitySummaryRead])
 def list_activity_summaries(
     limit: int = 100,
     db: Session = Depends(get_db),
 ):
-    return (
+    rows = (
         db.query(ActivitySummary)
         .order_by(ActivitySummary.generated_at.desc())
         .limit(max(1, min(limit, 500)))
         .all()
     )
+    return _enrich_with_comment_count(rows, db)
 
 
 @router.get("/activity-summaries/{summary_id}", response_model=ActivitySummaryRead)
@@ -1066,7 +1246,13 @@ def get_activity_summary(summary_id: str, db: Session = Depends(get_db)):
     row = db.get(ActivitySummary, summary_id)
     if not row:
         raise HTTPException(404, "Activity summary not found")
-    return row
+    d = ActivitySummaryRead.model_validate(row).model_dump()
+    from sqlalchemy import func
+    count = db.query(func.count(SummaryComment.id)).filter(
+        SummaryComment.summary_type == "activity", SummaryComment.summary_id == summary_id,
+    ).scalar() or 0
+    d["comment_count"] = count
+    return d
 
 
 @router.delete("/activity-summaries/{summary_id}", status_code=204)
@@ -1076,3 +1262,81 @@ def delete_activity_summary(summary_id: str, db: Session = Depends(get_db)):
         raise HTTPException(404, "Activity summary not found")
     db.delete(row)
     db.commit()
+
+
+@router.patch("/activity-summaries/{summary_id}/label", response_model=ActivitySummaryRead)
+def update_activity_summary_label(summary_id: str, body: ItemLabelUpdate, db: Session = Depends(get_db)):
+    row = db.get(ActivitySummary, summary_id)
+    if not row:
+        raise HTTPException(404, "Activity summary not found")
+    row.user_label = body.user_label.strip() if body.user_label else None
+    db.commit()
+    db.refresh(row)
+    # Return via the same helper that builds comment_count
+    return get_activity_summary(summary_id, db)
+
+
+# ── Activity Summary Comments ──
+
+@router.get("/activity-summaries/{summary_id}/comments", response_model=list[SummaryCommentRead])
+def list_activity_comments(summary_id: str, db: Session = Depends(get_db)):
+    if not db.get(ActivitySummary, summary_id):
+        raise HTTPException(404, "Activity summary not found")
+    return comment_service.list_comments(db, "activity", summary_id)
+
+
+@router.post(
+    "/activity-summaries/{summary_id}/comments",
+    response_model=SummaryCommentRead,
+    status_code=201,
+)
+def create_activity_comment(
+    summary_id: str,
+    body: SummaryCommentCreate,
+    db: Session = Depends(get_db),
+):
+    if not db.get(ActivitySummary, summary_id):
+        raise HTTPException(404, "Activity summary not found")
+    return comment_service.create_comment(
+        db,
+        summary_type="activity",
+        summary_id=summary_id,
+        comment_type=body.comment_type,
+        user_content=body.user_content,
+    )
+
+
+@router.delete("/activity-summaries/{summary_id}/comments/{comment_id}", status_code=204)
+def delete_activity_comment(
+    summary_id: str, comment_id: str, db: Session = Depends(get_db)
+):
+    c = comment_service.get_comment(db, comment_id)
+    if not c or c.summary_type != "activity" or c.summary_id != summary_id:
+        raise HTTPException(404, "Comment not found")
+    comment_service.delete_comment(db, comment_id)
+
+
+@router.post("/activity-summaries/{summary_id}/comments/{comment_id}/generate")
+async def generate_activity_comment_reply(
+    summary_id: str,
+    comment_id: str,
+    db: Session = Depends(get_db),
+):
+    row = db.get(ActivitySummary, summary_id)
+    if not row:
+        raise HTTPException(404, "Activity summary not found")
+
+    c = comment_service.get_comment(db, comment_id)
+    if not c or c.summary_type != "activity" or c.summary_id != summary_id:
+        raise HTTPException(404, "Comment not found")
+    if c.comment_type != "request":
+        raise HTTPException(400, "Only 'request' comments can generate AI replies")
+
+    return await comment_service.stream_reply(
+        db,
+        summary_type="activity",
+        parent_id=summary_id,
+        comment=c,
+        context_markdown=row.summary_markdown,
+        model=settings.default_model,
+    )

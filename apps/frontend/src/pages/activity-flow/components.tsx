@@ -4,6 +4,7 @@ import { useMemo } from 'react';
 import dayjs from 'dayjs';
 import type { ActivityItem } from '../../lib/api';
 import { renderMarkdown } from '../../components/SummaryPanel';
+import { CommentsSection } from '../../components/CommentsSection';
 import { userUrl, issueUrl } from '../../lib/youtrackLinks';
 import {
   classifyItem,
@@ -378,13 +379,15 @@ function describePhase(phase: string, progress: FetchProgress | null): string {
 }
 
 
+const STYLE_LABEL: Record<string, string> = { short: 'Brief', detailed: 'Detailed', custom: 'Custom' };
+
 export function SummaryCard({ summary }: { summary: UnifiedSummary }) {
   return (
     <article className="yt-summary-card">
       <header className="yt-summary-header">
         <div className="yt-summary-meta">
           <span className={`yt-summary-tag yt-summary-tag-${summary.summary_style}`}>
-            {summary.summary_style}
+            {STYLE_LABEL[summary.summary_style] ?? summary.summary_style}
           </span>
           <span className="yt-summary-sub">
             {summary.label} · {summary.activity_count} event{summary.activity_count !== 1 ? 's' : ''}
@@ -400,10 +403,18 @@ export function SummaryCard({ summary }: { summary: UnifiedSummary }) {
           </span>
         )}
       </header>
+      {summary.custom_prompt && (
+        <p className="yt-summary-custom-prompt">
+          <em>Prompt:</em> {summary.custom_prompt}
+        </p>
+      )}
       <div
         className="summary-markdown"
         dangerouslySetInnerHTML={{ __html: renderMarkdown(summary.summary_markdown, null) }}
       />
+      {summary.id && (
+        <CommentsSection summaryType="activity" summaryId={summary.id} />
+      )}
     </article>
   );
 }

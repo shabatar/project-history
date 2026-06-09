@@ -5,7 +5,7 @@ import type { ActivityItem } from '../../lib/api';
 
 export type Scope = 'board' | 'project';
 export type ViewMode = 'timeline' | 'by-issue';
-export type SummaryStyle = 'short' | 'detailed' | 'manager';
+export type SummaryStyle = 'short' | 'detailed' | 'custom';
 export type RangePreset =
   | 'yesterday'
   | 'last-week'
@@ -35,10 +35,12 @@ export const LOG_CAP = 100;
 
 /** Normalized summary payload shared by board and project scopes. */
 export interface UnifiedSummary {
+  id?: string;                  // persisted activity_summary id (if saved)
   label: string;
   since: string;
   until: string;
   summary_style: SummaryStyle;
+  custom_prompt?: string;
   model_name: string;
   activity_count: number;
   summary_markdown: string;

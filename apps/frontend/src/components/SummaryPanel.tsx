@@ -9,21 +9,22 @@ interface Props {
   loading?: boolean;
   repos?: Repository[];
   repoContext?: RepoContext | null;
+  onDelete?: (jobId: string) => void;
 }
 
 const styleLabels: Record<string, string> = {
-  short: 'Short',
+  short: 'Brief',
   detailed: 'Detailed',
-  manager: 'Briefly',
+  custom: 'Custom',
 };
 
 const styleIcons: Record<string, string> = {
-  short: 'S',
+  short: 'B',
   detailed: 'D',
-  manager: 'M',
+  custom: 'C',
 };
 
-export default function SummaryPanel({ jobs, loading, repos, repoContext }: Props) {
+export default function SummaryPanel({ jobs, loading, repos, repoContext, onDelete }: Props) {
   if (loading) {
     return <div className="empty-state">Loading summaries...</div>;
   }
@@ -42,7 +43,6 @@ export default function SummaryPanel({ jobs, loading, repos, repoContext }: Prop
   return (
     <div className="summary-list">
       {jobs.map((job) => {
-        // When showing all repos, resolve context per-job
         const repo = repos?.find((r) => r.id === job.repository_id);
         const ctx = repoContext ?? (repo
           ? { remote_url: repo.remote_url, name: repo.name }
@@ -53,6 +53,7 @@ export default function SummaryPanel({ jobs, loading, repos, repoContext }: Prop
             job={job}
             repoName={repo?.name}
             repoContext={ctx}
+            onDelete={onDelete ? () => onDelete(job.id) : undefined}
           />
         );
       })}
@@ -64,10 +65,12 @@ function SummaryCard({
   job,
   repoName,
   repoContext,
+  onDelete,
 }: {
   job: SummaryJob;
   repoName?: string;
   repoContext: RepoContext | null;
+  onDelete?: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const hasContent = job.result && job.result.summary_markdown.length > 0;
@@ -115,6 +118,17 @@ function SummaryCard({
           <span className={`report-status report-status-${job.status}`}>
             {job.status}
           </span>
+          {onDelete && (
+            <button
+              className="report-delete-btn"
+              title="Delete this summary"
+              onClick={() => {
+                if (confirm('Delete this summary?')) onDelete();
+              }}
+            >
+              ×
+            </button>
+          )}
         </div>
       </div>
 

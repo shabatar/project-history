@@ -11,7 +11,7 @@ from starlette.responses import JSONResponse
 from app.database import init_db
 from app.logging_config import setup_logging
 from app.config import settings
-from app.routers import commits, health, repositories, summaries
+from app.routers import commits, commit_snapshots, health, repositories, summaries
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -41,20 +41,18 @@ app.add_middleware(
 _rate_limit_store: dict[str, list[float]] = defaultdict(list)
 _RATE_LIMIT = 60
 _RATE_WINDOW = 60
-_MAX_BODY_SIZE = 1_048_576
+_MAX_BODY_SIZE = 5_242_880  # 5 MB — snapshot payloads can be larger than 1 MB
 
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
     path = request.url.path
     is_static = path.startswith("/assets") or path == "/favicon.svg"
 
-    # CSRF: reject unknown origins on state-changing requests
     if request.method in ("POST", "PATCH", "DELETE"):
         origin = request.headers.get("Origin", "")
         if origin and origin not in _ALLOWED_ORIGINS:
             return JSONResponse({"detail": "Forbidden origin"}, status_code=403)
 
-    # Rate limiting (skip static)
     if not is_static:
         ip = request.client.host if request.client else "unknown"
         now = time.time()
@@ -63,12 +61,22 @@ async def security_middleware(request: Request, call_next):
             return JSONResponse({"detail": "Rate limit exceeded"}, status_code=429)
         _rate_limit_store[ip].append(now)
 
-    # Body size limit
     content_length = request.headers.get("content-length")
     if content_length and int(content_length) > _MAX_BODY_SIZE:
         return JSONResponse({"detail": "Request body too large"}, status_code=413)
 
-    response: Response = await call_next(request)
+    if (
+        _STATIC_DIR.is_dir()
+        and request.method == "GET"
+        and not is_static
+        and path not in ("/health", "/favicon.svg")
+        and request.headers.get("Accept", "").startswith("text/html")
+    ):
+        from fastapi.responses import FileResponse
+        response: Response = FileResponse(_STATIC_DIR / "index.html")
+    else:
+        response = await call_next(request)
+
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
@@ -86,7 +94,7 @@ if settings.api_key:
         auth = request.headers.get("Authorization", "")
         key = auth.removeprefix("Bearer ").strip() if auth.startswith("Bearer ") else ""
         if key != settings.api_key:
-            if "text/html" in request.headers.get("Accept", ""):
+            if "text/html" in request.headers.get("Accept", "") and _STATIC_DIR.is_dir():
                 return await call_next(request)
             return JSONResponse({"detail": "Unauthorized"}, status_code=401)
         return await call_next(request)
@@ -94,6 +102,7 @@ if settings.api_key:
 app.include_router(health.router)
 app.include_router(repositories.router)
 app.include_router(commits.router)
+app.include_router(commit_snapshots.router)
 app.include_router(summaries.router)
 if settings.youtrack_enabled:
     from app.routers import youtrack
