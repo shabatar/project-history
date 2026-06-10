@@ -456,8 +456,8 @@ class ActivitySnapshotCreate(BaseModel):
     @field_validator("source_type")
     @classmethod
     def _check_source_type(cls, v: str) -> str:
-        if v not in ("board", "project"):
-            raise ValueError("source_type must be 'board' or 'project'")
+        if v not in ("board", "project", "issue"):
+            raise ValueError("source_type must be 'board', 'project', or 'issue'")
         return v
 
     @field_validator("activities")
@@ -507,5 +507,48 @@ class CommitSnapshotRead(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+# ── Tracked Issues ──
+
+class IssueSearchResult(BaseModel):
+    issue_id: str
+    internal_id: str
+    summary: str
+    state: str
+    assignee: str | None = None
+    project_short_name: str
+
+
+class TrackedIssueCreate(BaseModel):
+    issue_id: str
+    summary: str = ""
+    state: str = ""
+    assignee: str | None = None
+    project_short_name: str = ""
+
+
+class TrackedIssueRead(BaseModel):
+    id: str
+    issue_id: str
+    summary: str
+    state: str
+    assignee: str | None
+    project_short_name: str
+    added_at: datetime
+    last_refreshed_at: datetime | None
+
+    model_config = {"from_attributes": True}
+
+
+class IssueActivityRequest(BaseModel):
+    issue_ids: list[str]
+    since: str  # YYYY-MM-DD
+    until: str  # YYYY-MM-DD
+
+    @field_validator("issue_ids")
+    @classmethod
+    def _cap_ids(cls, v: list) -> list:
+        return v[:50]
 
 

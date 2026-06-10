@@ -5,8 +5,9 @@ import * as api from '../lib/api';
 import type { BoardSyncResult, IssueChange } from '../lib/api';
 import ActivityFlow from './ActivityFlow';
 import CommitWorkbench from './CommitWorkbench';
+import IssuesTracker from './IssuesTracker';
 
-type ActivitySection = 'boards' | 'projects' | 'commits';
+type ActivitySection = 'boards' | 'projects' | 'commits' | 'issues';
 
 type ComparePreset = 'last-sync' | 'yesterday' | 'last-week' | 'last-month' | 'last-3-months' | 'custom';
 type BoardTab = 'issues' | 'activity';
@@ -174,6 +175,12 @@ export default function Boards() {
             >
               Projects
             </button>
+            <button
+              className={`act-section-tab${activeSection === 'issues' ? ' active' : ''}`}
+              onClick={() => setSection('issues')}
+            >
+              Issues
+            </button>
           </>
         )}
         <button
@@ -190,6 +197,10 @@ export default function Boards() {
 
       {activeSection === 'projects' && (
         <ActivityFlow fixedScope="project" />
+      )}
+
+      {activeSection === 'issues' && (
+        <IssuesTracker />
       )}
 
       {activeSection === 'boards' && (<>

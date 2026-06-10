@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import get_db
 from app.database import SessionLocal
-from app.models import ActivitySnapshot, ActivitySummary, SummaryComment, YouTrackBoard, YouTrackConfig, YouTrackIssueSnapshot
+from app.models import ActivitySnapshot, ActivitySummary, SummaryComment, TrackedIssue, YouTrackBoard, YouTrackConfig, YouTrackIssueSnapshot
 from app.schemas import (
     ActivityItem,
     ActivityRequest,
@@ -26,11 +26,15 @@ from app.schemas import (
     BoardActivityResponse,
     BoardSyncRequest,
     BoardSyncResult,
+    IssueActivityRequest,
+    IssueSearchResult,
     ItemLabelUpdate,
     ProjectActivityResponse,
     ProjectActivitySummaryResponse,
     SummaryCommentCreate,
     SummaryCommentRead,
+    TrackedIssueCreate,
+    TrackedIssueRead,
     YouTrackBoardAdd,
     YouTrackBoardRead,
     YouTrackConfigCreate,
@@ -48,6 +52,9 @@ from app.services.youtrack_service import (
     fetch_activities,
     fetch_activities_cached,
     fetch_board_info,
+    fetch_issues_activity,
+    get_issue_state,
+    search_issues,
     get_board_project_ids,
     list_projects,
     resolve_token,
@@ -1341,3 +1348,124 @@ async def generate_activity_comment_reply(
         context_markdown=row.summary_markdown,
         model=settings.default_model,
     )
+
+# ── Issue Tracking endpoints ──────────────────────────────────────────────
+
+@router.get("/issues/search", response_model=list[IssueSearchResult])
+def search_yt_issues(
+    q: str = Query(..., min_length=1, max_length=200),
+    db: Session = Depends(get_db),
+):
+    token = _get_token(db)
+    cfg = db.query(YouTrackConfig).first()
+    if not cfg:
+        raise HTTPException(400, "YouTrack not configured")
+    try:
+        results = search_issues(cfg.base_url, token, q)
+        return results
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(502, f"YouTrack API error: {e.response.status_code}")
+
+
+@router.get("/tracked-issues", response_model=list[TrackedIssueRead])
+def list_tracked_issues(db: Session = Depends(get_db)):
+    return db.query(TrackedIssue).order_by(TrackedIssue.added_at.desc()).all()
+
+
+@router.post("/tracked-issues", response_model=TrackedIssueRead, status_code=201)
+def add_tracked_issue(body: TrackedIssueCreate, db: Session = Depends(get_db)):
+    existing = db.query(TrackedIssue).filter(TrackedIssue.issue_id == body.issue_id).first()
+    if existing:
+        return existing
+    issue = TrackedIssue(
+        issue_id=body.issue_id,
+        summary=body.summary,
+        state=body.state,
+        assignee=body.assignee,
+        project_short_name=body.project_short_name,
+    )
+    db.add(issue)
+    db.commit()
+    db.refresh(issue)
+    return issue
+
+
+@router.delete("/tracked-issues/{tracked_id}", status_code=204)
+def remove_tracked_issue(tracked_id: str, db: Session = Depends(get_db)):
+    issue = db.query(TrackedIssue).filter(TrackedIssue.id == tracked_id).first()
+    if issue:
+        db.delete(issue)
+        db.commit()
+
+
+@router.post("/tracked-issues/{tracked_id}/refresh", response_model=TrackedIssueRead)
+def refresh_tracked_issue(tracked_id: str, db: Session = Depends(get_db)):
+    from datetime import UTC, datetime
+    tracked = db.query(TrackedIssue).filter(TrackedIssue.id == tracked_id).first()
+    if not tracked:
+        raise HTTPException(404, "Tracked issue not found")
+    token = _get_token(db)
+    cfg = db.query(YouTrackConfig).first()
+    if not cfg:
+        raise HTTPException(400, "YouTrack not configured")
+    try:
+        data = get_issue_state(cfg.base_url, token, tracked.issue_id)
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(502, f"YouTrack API error: {e.response.status_code}")
+    if data:
+        tracked.summary = data["summary"]
+        tracked.state = data["state"]
+        tracked.assignee = data["assignee"]
+        tracked.last_refreshed_at = datetime.now(UTC)
+        db.commit()
+        db.refresh(tracked)
+    return tracked
+
+
+@router.post("/issues/activity", response_model=list[ActivityItem])
+async def fetch_issue_activity(body: IssueActivityRequest, db: Session = Depends(get_db)):
+    from datetime import UTC, datetime
+    token = _get_token(db)
+    cfg = db.query(YouTrackConfig).first()
+    if not cfg:
+        raise HTTPException(400, "YouTrack not configured")
+    since_ts = int(datetime.strptime(body.since, "%Y-%m-%d").replace(tzinfo=UTC).timestamp() * 1000)
+    until_ts = int(datetime.strptime(body.until, "%Y-%m-%d").replace(tzinfo=UTC).timestamp() * 1000) + 86_400_000
+    # Pull summaries from local DB — avoids one GET /api/issues/{id} per issue
+    tracked = db.query(TrackedIssue).filter(TrackedIssue.issue_id.in_(body.issue_ids)).all()
+    summaries = {t.issue_id: t.summary for t in tracked}
+    try:
+        items = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: fetch_issues_activity(cfg.base_url, token, body.issue_ids, since_ts, until_ts, summaries),
+        )
+        return items
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(502, f"YouTrack API error: {e.response.status_code}")
+
+
+@router.get("/issues/{issue_id}/commits")
+def get_commits_for_issue(issue_id: str, db: Session = Depends(get_db)):
+    from sqlalchemy import or_
+    from app.models import CommitRecord, Repository
+    from app.schemas import CommitRead
+    # Only alphanumeric + hyphen — same characters YouTrack issue IDs use
+    import re as _re
+    if not _re.match(r"^[A-Za-z0-9\-_]+$", issue_id):
+        raise HTTPException(400, "Invalid issue ID format")
+    pattern = f"%{issue_id}%"
+    commits = (
+        db.query(CommitRecord)
+        .join(Repository, CommitRecord.repository_id == Repository.id)
+        .filter(
+            or_(
+                CommitRecord.subject.ilike(pattern),
+                CommitRecord.body.ilike(pattern),
+            ),
+            Repository.is_active == True,
+        )
+        .order_by(CommitRecord.committed_at.desc())
+        .limit(200)
+        .all()
+    )
+    return [CommitRead.model_validate(c) for c in commits]

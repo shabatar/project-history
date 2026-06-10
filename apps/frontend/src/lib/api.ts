@@ -582,7 +582,7 @@ export async function streamSummarizeBoardActivity(
 
 export interface ActivitySummaryRecord {
   id: string;
-  source_type: 'board' | 'project';
+  source_type: 'board' | 'project' | 'issue';
   source_id: string;
   source_name: string;
   since: string;
@@ -738,7 +738,7 @@ export async function streamGenerateReply(
 
 export interface ActivitySnapshot {
   id: string;
-  source_type: 'board' | 'project';
+  source_type: 'board' | 'project' | 'issue';
   source_id: string;
   source_name: string;
   since: string;
@@ -763,7 +763,7 @@ export interface CommitSnapshot {
 }
 
 export async function saveActivitySnapshot(body: {
-  source_type: 'board' | 'project';
+  source_type: 'board' | 'project' | 'issue';
   source_id: string;
   source_name: string;
   since: string;
@@ -831,3 +831,67 @@ export async function getCommitSnapshotRaw(id: string): Promise<{ commits: Array
   return data;
 }
 
+
+// ── Issue Tracking ──
+
+export interface IssueSearchResult {
+  issue_id: string;
+  internal_id: string;
+  summary: string;
+  state: string;
+  assignee: string | null;
+  project_short_name: string;
+}
+
+export interface TrackedIssue {
+  id: string;
+  issue_id: string;
+  summary: string;
+  state: string;
+  assignee: string | null;
+  project_short_name: string;
+  added_at: string;
+  last_refreshed_at: string | null;
+}
+
+export async function searchYouTrackIssues(q: string): Promise<IssueSearchResult[]> {
+  const { data } = await client.get<IssueSearchResult[]>('/youtrack/issues/search', { params: { q } });
+  return data;
+}
+
+export async function listTrackedIssues(): Promise<TrackedIssue[]> {
+  const { data } = await client.get<TrackedIssue[]>('/youtrack/tracked-issues');
+  return data;
+}
+
+export async function addTrackedIssue(issue: Omit<TrackedIssue, 'id' | 'added_at' | 'last_refreshed_at'>): Promise<TrackedIssue> {
+  const { data } = await client.post<TrackedIssue>('/youtrack/tracked-issues', issue);
+  return data;
+}
+
+export async function removeTrackedIssue(id: string): Promise<void> {
+  await client.delete(`/youtrack/tracked-issues/${id}`);
+}
+
+export async function refreshTrackedIssue(id: string): Promise<TrackedIssue> {
+  const { data } = await client.post<TrackedIssue>(`/youtrack/tracked-issues/${id}/refresh`);
+  return data;
+}
+
+export async function fetchIssuesActivity(
+  issueIds: string[],
+  since: string,
+  until: string,
+): Promise<ActivityItem[]> {
+  const { data } = await client.post<ActivityItem[]>('/youtrack/issues/activity', {
+    issue_ids: issueIds,
+    since,
+    until,
+  }, { timeout: 120_000 });
+  return data;
+}
+
+export async function getCommitsForIssue(issueId: string): Promise<import('../types').Commit[]> {
+  const { data } = await client.get(`/youtrack/issues/${encodeURIComponent(issueId)}/commits`);
+  return data;
+}

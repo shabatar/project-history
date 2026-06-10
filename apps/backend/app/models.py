@@ -201,6 +201,21 @@ class CommitSnapshot(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
 
 
+class TrackedIssue(Base):
+    """Issue explicitly added by the user for ongoing tracking."""
+
+    __tablename__ = "tracked_issues"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    issue_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    summary: Mapped[str] = mapped_column(String(1000), default="")
+    state: Mapped[str] = mapped_column(String(255), default="")
+    assignee: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    project_short_name: Mapped[str] = mapped_column(String(255), default="")
+    added_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
+    last_refreshed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class YouTrackIssueSnapshot(Base):
     """Point-in-time snapshot of an issue on a board."""
 

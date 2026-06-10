@@ -137,47 +137,35 @@ def fetch_board_info(base_url: str, token: str, board_id: str) -> dict:
     return r.json()
 
 def fetch_board_issues(base_url: str, token: str, board_id: str) -> list[dict]:
-    """Fetch all sprint issues for a board via the agiles API.
+    """Fetch issues for a board using two flat requests.
 
-    Falls back to fetching the board's associated project issues if
-    the sprint endpoint doesn't return issues directly.
+    Previous approach queried /api/agiles/{id}/sprints with
+    issues(customFields(...)) inlined — a triple-nested expansion that forced
+    YouTrack to resolve N×M objects in one response.
+
+    New approach:
+      1. GET /api/agiles/{id}?fields=projects(shortName)  — one cheap flat call
+      2. GET /api/issues?query=project:{X}&fields=...     — one flat issue query
     """
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
-    # Try to get the current sprint's issues
-    sprints_url = f"{base_url}/api/agiles/{board_id}/sprints"
+    # Step 1: resolve the board's project shortName
     r = httpx.get(
-        sprints_url,
+        f"{base_url}/api/agiles/{board_id}",
         headers=headers,
-        params={"fields": "id,name,issues(id,idReadable,summary,customFields(name,value(name)))"},
-        timeout=30,
-    )
-    r.raise_for_status()
-    sprints = r.json()
-
-    # Collect issues from the most recent sprint that has issues
-    for sprint in reversed(sprints):
-        issues_raw = sprint.get("issues", [])
-        if issues_raw:
-            return [_normalize_issue(iss) for iss in issues_raw]
-
-    # Fallback: get the board's project and query issues directly
-    board_info_url = f"{base_url}/api/agiles/{board_id}"
-    r2 = httpx.get(
-        board_info_url,
-        headers=headers,
-        params={"fields": "projects(id,shortName)"},
+        params={"fields": "projects(shortName)"},
         timeout=15,
     )
-    r2.raise_for_status()
-    projects = r2.json().get("projects", [])
+    r.raise_for_status()
+    projects = r.json().get("projects", [])
     if not projects:
         return []
 
     project_short = projects[0].get("shortName", "")
-    issues_url = f"{base_url}/api/issues"
-    r3 = httpx.get(
-        issues_url,
+
+    # Step 2: flat issues query — no nested sprints expansion
+    r2 = httpx.get(
+        f"{base_url}/api/issues",
         headers=headers,
         params={
             "query": f"project: {{{project_short}}} sort by: updated desc",
@@ -186,8 +174,8 @@ def fetch_board_issues(base_url: str, token: str, board_id: str) -> list[dict]:
         },
         timeout=30,
     )
-    r3.raise_for_status()
-    return [_normalize_issue(iss) for iss in r3.json()]
+    r2.raise_for_status()
+    return [_normalize_issue(iss) for iss in r2.json()]
 
 def _normalize_issue(raw: dict) -> dict:
     """Extract state and assignee from customFields."""
@@ -620,3 +608,86 @@ def _extract_field_value(items) -> str | None:
     if isinstance(items, str):
         return items
     return str(items) if items else None
+
+
+# ── Issue tracking helpers ─────────────────────────────────────────────
+
+def _parse_issue_fields(issue: dict) -> dict:
+    """Normalize a raw YouTrack issue object into a flat dict."""
+    state = ""
+    assignee = None
+    for cf in issue.get("customFields", []):
+        name = (cf.get("name") or "").lower()
+        val = cf.get("value")
+        if "state" in name and isinstance(val, dict):
+            state = val.get("localizedName") or val.get("name") or ""
+        elif "assignee" in name and isinstance(val, dict):
+            assignee = val.get("name")
+    project_short = (issue.get("project") or {}).get("shortName", "")
+    return {
+        "issue_id": issue.get("idReadable", ""),
+        "internal_id": issue.get("id", ""),
+        "summary": issue.get("summary", ""),
+        "state": state,
+        "assignee": assignee,
+        "project_short_name": project_short,
+    }
+
+
+def search_issues(base_url: str, token: str, query: str, top: int = 20) -> list[dict]:
+    """Full-text search for YouTrack issues."""
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    r = httpx.get(
+        f"{base_url}/api/issues",
+        headers=headers,
+        params={
+            "query": query,
+            "fields": "id,idReadable,summary,customFields(name,value(name,localizedName)),project(shortName)",
+            "$top": str(top),
+        },
+        timeout=15,
+    )
+    r.raise_for_status()
+    return [_parse_issue_fields(iss) for iss in r.json()]
+
+
+def get_issue_state(base_url: str, token: str, issue_id_readable: str) -> dict | None:
+    """Fetch current state/assignee for a single issue by readable ID."""
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    r = httpx.get(
+        f"{base_url}/api/issues/{issue_id_readable}",
+        headers=headers,
+        params={"fields": "id,idReadable,summary,customFields(name,value(name,localizedName)),project(shortName)"},
+        timeout=15,
+    )
+    if r.status_code == 404:
+        return None
+    r.raise_for_status()
+    return _parse_issue_fields(r.json())
+
+
+def fetch_issues_activity(
+    base_url: str,
+    token: str,
+    issue_ids: list[str],
+    since_ts: int,
+    until_ts: int,
+    summaries: dict[str, str] | None = None,
+) -> list[ActivityItem]:
+    """Fetch activity events for a given list of readable issue IDs.
+
+    YouTrack's REST API accepts readable IDs (e.g. PROJ-123) directly in
+    /api/issues/{id}/activities — no need to resolve the internal UUID first.
+    Pass `summaries` (a {issue_id: summary} dict from the DB) to populate
+    ActivityItem.issue_summary without any extra API calls.
+    """
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    all_items: list[ActivityItem] = []
+    for issue_id in issue_ids:
+        summary = (summaries or {}).get(issue_id, "")
+        items = _fetch_issue_activities(
+            base_url, headers, issue_id, issue_id, summary, since_ts, until_ts,
+        )
+        all_items.extend(items)
+    all_items.sort(key=lambda a: a.timestamp, reverse=True)
+    return all_items

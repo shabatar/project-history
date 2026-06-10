@@ -4318,3 +4318,365 @@ select.input { cursor: pointer; }
   gap: 6px;
   margin-left: auto;
 }
+
+/* ── Issues Tracker (it-*) ─────────────────────────────────────────── */
+
+.it-root {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.it-section {
+  padding: 20px 0 16px;
+  border-bottom: 1px solid var(--border);
+}
+.it-section:last-child { border-bottom: none; }
+
+.it-section-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.it-section-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.it-section-header .it-section-title { margin: 0; }
+
+.it-count-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 700;
+  background: var(--primary, #a78bfa);
+  color: #fff;
+}
+
+/* Search */
+.it-search-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.it-search-input { flex: 1; }
+
+.it-search-results {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.it-result-row,
+.it-tracked-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--accent-bg);
+  border: 1px solid var(--border);
+  transition: border-color .15s;
+}
+
+.it-tracked-row {
+  cursor: pointer;
+  user-select: none;
+}
+.it-tracked-row:hover { border-color: var(--primary, #a78bfa); }
+.it-tracked-row.it-selected {
+  border-color: var(--primary, #a78bfa);
+  background: color-mix(in srgb, var(--primary, #a78bfa) 6%, var(--accent-bg));
+}
+
+.it-issue-id {
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--primary, #a78bfa);
+  white-space: nowrap;
+  min-width: 70px;
+}
+
+.it-issue-summary {
+  flex: 1;
+  font-size: 13px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.it-result-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.it-state-chip {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 500;
+  background: color-mix(in srgb, var(--primary, #a78bfa) 15%, var(--accent-bg));
+  color: var(--text-secondary);
+  border: 1px solid color-mix(in srgb, var(--primary, #a78bfa) 30%, transparent);
+  white-space: nowrap;
+}
+
+.it-assignee {
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.it-tracked-badge {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--success, #4ade80);
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--success, #4ade80) 12%, var(--accent-bg));
+  border: 1px solid color-mix(in srgb, var(--success, #4ade80) 30%, transparent);
+  flex-shrink: 0;
+}
+
+.it-track-btn {
+  flex-shrink: 0;
+  background: color-mix(in srgb, var(--primary, #a78bfa) 12%, var(--accent-bg));
+  border: 1px solid color-mix(in srgb, var(--primary, #a78bfa) 40%, transparent);
+  color: var(--primary, #a78bfa);
+}
+.it-track-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--primary, #a78bfa) 22%, var(--accent-bg));
+}
+
+.it-refreshed-at {
+  font-size: 11px;
+  color: var(--text-muted, var(--text-secondary));
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.it-row-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.it-refresh-btn {
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 6px;
+}
+
+.it-remove-btn {
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 6px;
+}
+
+.it-empty-hint {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin: 0;
+  padding: 6px 0;
+}
+
+.it-tracked-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.it-selection-hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.it-clear-selection {
+  background: none;
+  border: none;
+  color: var(--primary, #a78bfa);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0;
+  text-decoration: underline;
+}
+
+/* Activity section */
+.it-period-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.it-presets {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.it-custom-range {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.it-range-sep {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.it-fetch-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.it-fetch-label {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.it-act-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+/* Commits section */
+.it-commits-selector {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.it-commits-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.it-count-line {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin: 0 0 8px;
+}
+
+.it-commit-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  background: var(--accent-bg);
+  border: 1px solid var(--border);
+}
+
+.it-commit-hash {
+  font-size: 11px;
+  font-family: var(--font-mono, monospace);
+  color: var(--primary, #a78bfa);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.it-commit-subject {
+  flex: 1;
+  font-size: 13px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.it-commit-author {
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.it-commit-date {
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.it-highlight {
+  background: color-mix(in srgb, #facc15 40%, transparent);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+/* commits multi-select chips */
+.it-commit-chips-area {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.it-commit-chip {
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: var(--font-mono, monospace);
+  border: 1px solid var(--border);
+  background: var(--accent-bg);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background .12s, border-color .12s, color .12s;
+}
+.it-commit-chip:hover {
+  border-color: var(--primary, #a78bfa);
+  color: var(--primary, #a78bfa);
+}
+.it-commit-chip.active {
+  background: color-mix(in srgb, var(--primary, #a78bfa) 18%, var(--accent-bg));
+  border-color: var(--primary, #a78bfa);
+  color: var(--primary, #a78bfa);
+}
+.it-commit-chip-custom {
+  opacity: .85;
+}
+
+.it-custom-id-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.it-custom-id-input { width: 180px; }
+
+.it-commit-issues {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
