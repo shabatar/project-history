@@ -3,13 +3,14 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../store';
 import { useUrlParams } from '../lib/useUrlParams';
-import type { SummaryStyle, Repository } from '../types';
+import type { Commit, SummaryStyle, Repository } from '../types';
 import * as api from '../lib/api';
 import {
   useRepositories,
   useOllamaModels,
   useBranches,
   useCommits,
+  useAutoParseOnce,
 } from '../lib/hooks';
 import DateRangePicker from '../components/DateRangePicker';
 import CommitTable from '../components/CommitTable';
@@ -43,6 +44,10 @@ export default function CommitWorkbench() {
   const [branch, setBranch] = useState('');
   const [baseBranch, setBaseBranch] = useState('');
   const [customPrompt, setCustomPrompt] = useState('');
+
+  const [branchDiffCommits, setBranchDiffCommits] = useState<Commit[] | null>(null);
+  const [branchDiffLoading, setBranchDiffLoading] = useState(false);
+  const [branchDiffError, setBranchDiffError] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
   const [snapshotSaving, setSnapshotSaving] = useState(false);
   const [snapshotSaved, setSnapshotSaved] = useState(false);
@@ -81,12 +86,41 @@ export default function CommitWorkbench() {
     return result.sort();
   }, [branches]);
 
-  // Always fetch commits for the selected repo+range — the table IS the preview
+  const clonedRepoIds = useMemo(() => new Set(repos.filter((r) => r.last_synced_at).map((r) => r.id)), [repos]);
+  useAutoParseOnce(
+    mode === 'date-range' && clonedRepoIds.has(selectedRepoId ?? '') ? selectedRepoId : null,
+    dateRange,
+  );
+
   const { data: commits = [], isLoading: commitsLoading } = useCommits(
-    selectedRepoId,
+    mode === 'date-range' ? selectedRepoId : null,
     dateRange.from,
     dateRange.to,
   );
+
+  useEffect(() => {
+    if (mode !== 'branch-diff' || !selectedRepoId || !branch || !baseBranch) {
+      setBranchDiffCommits(null);
+      setBranchDiffError(null);
+      return;
+    }
+    let cancelled = false;
+    setBranchDiffLoading(true);
+    setBranchDiffError(null);
+    setBranchDiffCommits(null);
+    api.parseBranchDiffCommits(selectedRepoId, branch, baseBranch)
+      .then((result) => { if (!cancelled) { setBranchDiffCommits(result); setBranchDiffLoading(false); } })
+      .catch((e) => {
+        if (!cancelled) {
+          setBranchDiffError(e?.response?.data?.detail || e?.message || 'Failed to load branch diff');
+          setBranchDiffLoading(false);
+        }
+      });
+    return () => { cancelled = true; };
+  }, [selectedRepoId, branch, baseBranch, mode]);
+
+  const effectiveCommits = mode === 'branch-diff' ? (branchDiffCommits ?? []) : commits;
+  const effectiveLoading = mode === 'branch-diff' ? branchDiffLoading : commitsLoading;
 
   const repoMap = useMemo(() => {
     const m = new Map<string, Repository>();
@@ -95,7 +129,7 @@ export default function CommitWorkbench() {
   }, [repos]);
 
   async function handleSaveSnapshot() {
-    if (!selectedRepoId || commits.length === 0) return;
+    if (!selectedRepoId || effectiveCommits.length === 0) return;
     setSnapshotSaving(true);
     setSnapshotSaved(false);
     setSnapshotError(null);
@@ -108,7 +142,7 @@ export default function CommitWorkbench() {
         until: mode === 'date-range' ? dateRange.to : undefined,
         branch: mode === 'branch-diff' ? branch : undefined,
         base_branch: mode === 'branch-diff' ? baseBranch || undefined : undefined,
-        commits: commits.slice(0, 2000).map((c) => ({
+        commits: effectiveCommits.slice(0, 2000).map((c) => ({
           commit_hash: c.commit_hash,
           author_name: c.author_name,
           author_email: c.author_email,
@@ -178,6 +212,7 @@ export default function CommitWorkbench() {
   const canGenerate =
     !!selectedRepoId &&
     !generating &&
+    effectiveCommits.length > 0 &&
     (mode === 'date-range' || !!branch) &&
     (summaryStyle !== 'custom' || customPrompt.trim().length > 0);
 
@@ -252,29 +287,46 @@ export default function CommitWorkbench() {
       {/* ── Commit table (always shown when repo selected) ── */}
       {selectedRepoId && (
         <>
-          <div className="cw-commits-bar">
-            <span className="ce-count">
-              {commitsLoading ? 'Loading…' : `${commits.length} commit${commits.length !== 1 ? 's' : ''}`}
-            </span>
-            <div className="cw-actions">
-              <button
-                className={`btn btn-sm pf-snapshot-btn${snapshotSaved ? ' pf-snapshot-saved' : ''}`}
-                onClick={snapshotSaved && savedSnapshotPath ? () => navigate(savedSnapshotPath) : handleSaveSnapshot}
-                disabled={snapshotSaving || (!snapshotSaved && commits.length === 0)}
-                title={snapshotSaved ? 'Click to open saved snapshot' : 'Save to Reports for future reference'}
-              >
-                {snapshotSaved ? '✓ Saved · View →' : snapshotSaving ? 'Saving…' : '↓ Save snapshot'}
-              </button>
-              {snapshotError && <span className="snapshot-save-error">{snapshotError}</span>}
+          {mode === 'branch-diff' && !branch && (
+            <div className="empty-state"><p>Select a branch above to preview the diff.</p></div>
+          )}
+          {mode === 'branch-diff' && branch && branchDiffError && (
+            <div className="empty-state cw-diff-error">
+              <p>Could not load branch diff: {branchDiffError}</p>
             </div>
-          </div>
-          <CommitTable
-            commits={commits}
-            loading={commitsLoading}
-            onSelectionCopy={() => {}}
-            showRepoColumn={false}
-            repoMap={repoMap}
-          />
+          )}
+          {mode === 'branch-diff' && branch && !branchDiffError && !branchDiffLoading && branchDiffCommits !== null && branchDiffCommits.length === 0 && (
+            <div className="empty-state">
+              <p>No commits in <strong>{branch}</strong> that are not already in <strong>{baseBranch}</strong>.</p>
+            </div>
+          )}
+          {(!branchDiffError && (mode === 'date-range' || (mode === 'branch-diff' && !!branch))) && (
+            <>
+              <div className="cw-commits-bar">
+                <span className="ce-count">
+                  {effectiveLoading ? 'Loading…' : `${effectiveCommits.length} commit${effectiveCommits.length !== 1 ? 's' : ''}`}
+                </span>
+                <div className="cw-actions">
+                  <button
+                    className={`btn btn-sm pf-snapshot-btn${snapshotSaved ? ' pf-snapshot-saved' : ''}`}
+                    onClick={snapshotSaved && savedSnapshotPath ? () => navigate(savedSnapshotPath) : handleSaveSnapshot}
+                    disabled={snapshotSaving || (!snapshotSaved && effectiveCommits.length === 0)}
+                    title={snapshotSaved ? 'Click to open saved snapshot' : 'Save to Reports for future reference'}
+                  >
+                    {snapshotSaved ? '✓ Saved · View →' : snapshotSaving ? 'Saving…' : '↓ Save snapshot'}
+                  </button>
+                  {snapshotError && <span className="snapshot-save-error">{snapshotError}</span>}
+                </div>
+              </div>
+              <CommitTable
+                commits={effectiveCommits}
+                loading={effectiveLoading}
+                onSelectionCopy={() => {}}
+                showRepoColumn={false}
+                repoMap={repoMap}
+              />
+            </>
+          )}
         </>
       )}
 
@@ -285,7 +337,7 @@ export default function CommitWorkbench() {
       )}
 
       {/* ── Generate report panel ── */}
-      {selectedRepoId && (
+      {selectedRepoId && effectiveCommits.length > 0 && (
         <div className="cw-generate-panel">
           <h4 className="cw-generate-heading">Generate AI Report</h4>
           <div className="cw-generate-body">

@@ -2,6 +2,7 @@ import { useState, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import * as api from '../lib/api';
 import { renderMarkdown } from './SummaryPanel';
+import { useAppStore } from '../store';
 
 interface Props {
   summaryType: 'git' | 'activity' | 'activity-snapshot' | 'git-snapshot';
@@ -10,6 +11,7 @@ interface Props {
 
 export function CommentsSection({ summaryType, summaryId }: Props) {
   const qc = useQueryClient();
+  const savedQuestions = useAppStore((s) => s.settings.savedQuestions ?? []);
   const qKey = ['comments', summaryType, summaryId];
 
   const { data: comments = [], isLoading } = useQuery({
@@ -128,6 +130,25 @@ export function CommentsSection({ summaryType, summaryId }: Props) {
       )}
 
       {streamError && <p className="cs-error">{streamError}</p>}
+
+      {savedQuestions.length > 0 && (
+        <div className="cs-suggestions">
+          <span className="cs-suggestions-label">Quick questions</span>
+          <div className="cs-suggestion-chips">
+            {savedQuestions.map((q, i) => (
+              <button
+                key={i}
+                className="cs-suggestion-chip"
+                onClick={() => setText(q)}
+                disabled={isStreaming}
+                title={q}
+              >
+                {q}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="cs-input-row">
         <textarea

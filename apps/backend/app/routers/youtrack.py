@@ -983,6 +983,7 @@ def create_activity_snapshot(body: ActivitySnapshotCreate, db: Session = Depends
         until=body.until,
         activity_count=len(body.activities),
         raw_json=raw,
+        view_mode=body.view_mode if body.view_mode in ("timeline", "by-issue") else "timeline",
     )
     db.add(snap)
     db.commit()

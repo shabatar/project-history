@@ -349,6 +349,7 @@ export default function ActivityFlow({ fixedBoard, fixedScope }: ActivityFlowPro
         source_name: sourceName,
         since,
         until,
+        view_mode: view,
         activities,
       });
       setSnapshotSaved(true);

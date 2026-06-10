@@ -2,7 +2,7 @@ import { useState, useMemo, useEffect, useRef } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { useUrlParams } from '../lib/useUrlParams';
-import { useRepositories, useCommits } from '../lib/hooks';
+import { useRepositories, useCommits, useAutoParseOnce } from '../lib/hooks';
 import * as api from '../lib/api';
 import DateRangePicker from '../components/DateRangePicker';
 import CommitTable from '../components/CommitTable';
@@ -10,35 +10,6 @@ import type { Commit, Repository } from '../types';
 
 type ViewMode = 'merged' | 'side-by-side';
 
-function useAutoParseOnce(
-  repoId: string | null,
-  dateRange: { from: string; to: string },
-) {
-  const qc = useQueryClient();
-  const parsedRef = useRef<Set<string>>(new Set());
-
-  useEffect(() => {
-    if (!repoId) return;
-    const key = `${repoId}:${dateRange.from}:${dateRange.to}`;
-    if (parsedRef.current.has(key)) return;
-    if (parsedRef.current.size >= 100) {
-      // Drop the oldest entry to prevent unbounded growth
-      const oldest = parsedRef.current.values().next().value;
-      parsedRef.current.delete(oldest!);
-    }
-    parsedRef.current.add(key);
-
-    api
-      .parseCommits(repoId, dateRange.from, dateRange.to)
-      .then(() => {
-        qc.invalidateQueries({ queryKey: ['commits'] });
-        qc.invalidateQueries({ queryKey: ['repositories'] });
-      })
-      .catch(() => {
-        // silently ignore — user will see empty commits
-      });
-  }, [repoId, dateRange.from, dateRange.to]);
-}
 
 export default function CommitExplorer() {
   const { selectedRepoId, setSelectedRepoId, dateRange, setDateRange } =

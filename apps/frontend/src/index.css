@@ -3818,6 +3818,140 @@ select.input { cursor: pointer; }
   border-left: 2px solid var(--border);
 }
 
+/* ── CommentsSection: quick question suggestions ── */
+
+.cs-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 0 4px;
+}
+
+.cs-suggestions-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted, #888);
+}
+
+.cs-suggestion-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.cs-suggestion-chip {
+  display: inline-block;
+  font-size: 0.78rem;
+  line-height: 1.3;
+  padding: 4px 11px;
+  border-radius: 100px;
+  border: 1px solid color-mix(in srgb, var(--primary, #a78bfa) 35%, transparent);
+  background: color-mix(in srgb, var(--primary, #a78bfa) 7%, transparent);
+  color: var(--primary, #a78bfa);
+  cursor: pointer;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.cs-suggestion-chip:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--primary, #a78bfa) 16%, transparent);
+  border-color: color-mix(in srgb, var(--primary, #a78bfa) 60%, transparent);
+}
+
+.cs-suggestion-chip:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+/* ── Settings: saved questions list ── */
+
+.sq-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 0 0 10px;
+  max-width: 500px;
+}
+
+.sq-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--accent-bg);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 8px 10px;
+  transition: border-color 0.1s;
+}
+
+.sq-item:hover { border-color: color-mix(in srgb, var(--border) 60%, var(--primary, #a78bfa)); }
+
+.sq-item[draggable] { cursor: grab; }
+.sq-item[draggable]:active { cursor: grabbing; }
+
+.sq-item-over {
+  border-color: var(--primary, #a78bfa);
+  background: color-mix(in srgb, var(--primary, #a78bfa) 6%, var(--accent-bg));
+}
+
+.sq-grip {
+  color: var(--text-muted, #888);
+  font-size: 0.9rem;
+  opacity: 0.4;
+  cursor: grab;
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.sq-text {
+  flex: 1;
+  font-size: 0.86rem;
+  color: var(--text-h);
+  line-height: 1.4;
+  min-width: 0;
+}
+
+.sq-remove {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-muted, #888);
+  font-size: 1.1rem;
+  line-height: 1;
+  padding: 1px 4px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  transition: color 0.1s, background 0.1s;
+}
+
+.sq-remove:hover {
+  color: var(--danger, #e53e3e);
+  background: color-mix(in srgb, var(--danger, #e53e3e) 10%, transparent);
+}
+
+.sq-hint { margin-bottom: 10px; }
+
+.sq-empty {
+  font-size: 0.82rem;
+  color: var(--text-muted, #888);
+  padding: 10px 0 4px;
+  font-style: italic;
+}
+
+.sq-add-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  max-width: 500px;
+}
+
+.sq-input { flex: 1; }
+
 /* ── Activity page section tabs ── */
 .act-page { padding-top: 0; }
 

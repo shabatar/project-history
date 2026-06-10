@@ -178,6 +178,7 @@ class ActivitySnapshot(Base):
     until: Mapped[str] = mapped_column(String(10), nullable=False)
     activity_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     raw_json: Mapped[str] = mapped_column(Text, nullable=False)  # JSON array of ActivityItem
+    view_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="timeline")  # "timeline" | "by-issue"
     user_label: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
 

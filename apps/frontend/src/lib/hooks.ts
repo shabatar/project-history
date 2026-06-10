@@ -3,6 +3,7 @@ import {
   useMutation,
   useQueryClient,
 } from '@tanstack/react-query';
+import { useEffect, useRef } from 'react';
 import * as api from './api';
 import type { Repository, Commit, SummaryJob, BranchInfo, OllamaModel } from '../types';
 
@@ -72,6 +73,32 @@ export function useBranches(repositoryId: string | null) {
 }
 
 // ── Commits ──
+
+export function useAutoParseOnce(
+  repoId: string | null,
+  dateRange: { from: string; to: string },
+) {
+  const qc = useQueryClient();
+  const parsedRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (!repoId) return;
+    const key = `${repoId}:${dateRange.from}:${dateRange.to}`;
+    if (parsedRef.current.has(key)) return;
+    if (parsedRef.current.size >= 100) {
+      const oldest = parsedRef.current.values().next().value;
+      parsedRef.current.delete(oldest!);
+    }
+    parsedRef.current.add(key);
+    api
+      .parseCommits(repoId, dateRange.from, dateRange.to)
+      .then(() => {
+        qc.invalidateQueries({ queryKey: ['commits'] });
+        qc.invalidateQueries({ queryKey: ['repositories'] });
+      })
+      .catch(() => {});
+  }, [repoId, dateRange.from, dateRange.to]);
+}
 
 export function useCommits(
   repositoryId: string | null,

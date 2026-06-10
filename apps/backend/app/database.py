@@ -69,6 +69,9 @@ def init_db() -> None:
         if "user_label" not in cols:
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE activity_snapshots ADD COLUMN user_label VARCHAR(500)"))
+        if "view_mode" not in cols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE activity_snapshots ADD COLUMN view_mode VARCHAR(16) NOT NULL DEFAULT 'timeline'"))
 
     if "commit_snapshots" in inspector.get_table_names():
         cols = {c["name"] for c in inspector.get_columns("commit_snapshots")}

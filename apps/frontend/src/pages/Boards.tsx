@@ -33,9 +33,17 @@ function presetToDate(preset: Exclude<ComparePreset, 'last-sync' | 'custom'>): s
 export default function Boards() {
   const qc = useQueryClient();
 
+  const { data: features } = useQuery({
+    queryKey: ['features'],
+    queryFn: api.getFeatures,
+    staleTime: 60_000,
+  });
+  const hasYouTrack = !!features?.youtrack;
+
   const { data: config, isLoading: configLoading } = useQuery({
     queryKey: ['yt-config'],
     queryFn: api.getYouTrackConfig,
+    enabled: hasYouTrack,
   });
 
   const [baseUrl, setBaseUrl] = useState('');
@@ -137,7 +145,13 @@ export default function Boards() {
   }
 
   const [expandedBoardId, setExpandedBoardId] = useState<string | null>(null);
-  const [section, setSection] = useState<ActivitySection>('boards');
+  const [section, setSection] = useState<ActivitySection>('commits');
+
+  useEffect(() => {
+    if (hasYouTrack && section === 'commits') setSection('boards');
+  }, [hasYouTrack]);
+
+  const activeSection = hasYouTrack ? section : 'commits';
 
   return (
     <div className="page act-page">
@@ -145,38 +159,40 @@ export default function Boards() {
         <h2>Activity</h2>
       </div>
 
-      {/* Section tabs */}
       <div className="act-section-tabs">
+        {hasYouTrack && (
+          <>
+            <button
+              className={`act-section-tab${activeSection === 'boards' ? ' active' : ''}`}
+              onClick={() => setSection('boards')}
+            >
+              Boards
+            </button>
+            <button
+              className={`act-section-tab${activeSection === 'projects' ? ' active' : ''}`}
+              onClick={() => setSection('projects')}
+            >
+              Projects
+            </button>
+          </>
+        )}
         <button
-          className={`act-section-tab${section === 'boards' ? ' active' : ''}`}
-          onClick={() => setSection('boards')}
-        >
-          Boards
-        </button>
-        <button
-          className={`act-section-tab${section === 'projects' ? ' active' : ''}`}
-          onClick={() => setSection('projects')}
-        >
-          Projects
-        </button>
-        <button
-          className={`act-section-tab${section === 'commits' ? ' active' : ''}`}
+          className={`act-section-tab${activeSection === 'commits' ? ' active' : ''}`}
           onClick={() => setSection('commits')}
         >
           Commits
         </button>
       </div>
 
-      {/* Keep-alive: mount all sections, show only the active one */}
-      <div style={{ display: section === 'commits' ? 'block' : 'none' }}>
+      <div style={{ display: activeSection === 'commits' ? 'block' : 'none' }}>
         <CommitWorkbench />
       </div>
 
-      {section === 'projects' && (
+      {activeSection === 'projects' && (
         <ActivityFlow fixedScope="project" />
       )}
 
-      {section === 'boards' && (<>
+      {activeSection === 'boards' && (<>
 
       {configLoading ? (
         <div className="empty-state">Loading...</div>

@@ -82,6 +82,8 @@ export default function Settings() {
             />
           </section>
 
+          <SavedQuestionsSection />
+
           <section className="settings-section">
             <h3>Issue Tracker</h3>
             <form className="settings-form" onSubmit={(e) => e.preventDefault()}>
@@ -113,6 +115,89 @@ export default function Settings() {
 
       {tab === 'logs' && <LogsPanel />}
     </div>
+  );
+}
+
+function SavedQuestionsSection() {
+  const { settings, setSettings } = useAppStore();
+  const questions = settings.savedQuestions ?? [];
+  const [draft, setDraft] = useState('');
+  const dragIdx = useRef<number | null>(null);
+  const [dragOver, setDragOver] = useState<number | null>(null);
+
+  function add() {
+    const q = draft.trim();
+    if (!q || questions.includes(q)) return;
+    setSettings({ savedQuestions: [...questions, q] });
+    setDraft('');
+  }
+
+  function remove(idx: number) {
+    setSettings({ savedQuestions: questions.filter((_, i) => i !== idx) });
+  }
+
+  function onDragStart(idx: number) {
+    dragIdx.current = idx;
+  }
+
+  function onDragOver(e: React.DragEvent, idx: number) {
+    e.preventDefault();
+    setDragOver(idx);
+  }
+
+  function onDrop(targetIdx: number) {
+    const from = dragIdx.current;
+    if (from === null || from === targetIdx) { setDragOver(null); return; }
+    const next = [...questions];
+    const [moved] = next.splice(from, 1);
+    next.splice(targetIdx, 0, moved);
+    setSettings({ savedQuestions: next });
+    dragIdx.current = null;
+    setDragOver(null);
+  }
+
+  function onDragEnd() {
+    dragIdx.current = null;
+    setDragOver(null);
+  }
+
+  return (
+    <section className="settings-section">
+      <h3>Saved Questions</h3>
+      <p className="form-hint sq-hint">
+        These appear as quick suggestions in the Notes &amp; Follow-ups panel on every report.
+      </p>
+      <div className="sq-list">
+        {questions.map((q, i) => (
+          <div
+            key={q}
+            className={`sq-item${dragOver === i ? ' sq-item-over' : ''}`}
+            draggable
+            onDragStart={() => onDragStart(i)}
+            onDragOver={(e) => onDragOver(e, i)}
+            onDrop={() => onDrop(i)}
+            onDragEnd={onDragEnd}
+          >
+            <span className="sq-grip">⠿</span>
+            <span className="sq-text">{q}</span>
+            <button className="sq-remove" onClick={() => remove(i)} title="Remove">×</button>
+          </div>
+        ))}
+        {questions.length === 0 && (
+          <div className="sq-empty">No saved questions yet.</div>
+        )}
+      </div>
+      <div className="sq-add-row">
+        <input
+          className="input sq-input"
+          placeholder="Type a question and press Enter…"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); add(); } }}
+        />
+        <button className="btn btn-sm sq-add-btn" onClick={add} disabled={!draft.trim()}>Add</button>
+      </div>
+    </section>
   );
 }
 

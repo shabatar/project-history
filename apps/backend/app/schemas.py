@@ -450,6 +450,7 @@ class ActivitySnapshotCreate(BaseModel):
     source_name: str
     since: str               # YYYY-MM-DD
     until: str
+    view_mode: str = "timeline"  # "timeline" | "by-issue"
     activities: list[ActivityItem]  # raw events; capped at 20 000 items
 
     @field_validator("source_type")
@@ -472,6 +473,7 @@ class ActivitySnapshotRead(BaseModel):
     since: str
     until: str
     activity_count: int
+    view_mode: str = "timeline"
     user_label: str | None = None
     created_at: datetime
 

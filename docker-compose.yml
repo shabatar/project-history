@@ -1,0 +1,48 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ph-data:/app/data
+      - ph-repos:/app/repos
+    environment:
+      # Point at any LLM backend — Ollama, LocalAI, vLLM, LM Studio, etc.
+      # Use PT_OLLAMA_CLIENT_MODE=openai for any OpenAI-compatible endpoint.
+      PT_OLLAMA_BASE_URL: ${PT_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      PT_OLLAMA_CLIENT_MODE: ${PT_OLLAMA_CLIENT_MODE:-native}
+      PT_DEFAULT_MODEL: ${PT_DEFAULT_MODEL:-llama3.1}
+      # Secrets and optional config — set in .env (see .env.example)
+      PT_API_KEY: ${PT_API_KEY:-}
+      PT_YOUTRACK_ENABLED: ${PT_YOUTRACK_ENABLED:-false}
+      PT_YOUTRACK_BASE_URL: ${PT_YOUTRACK_BASE_URL:-}
+      PT_YOUTRACK_API_TOKEN: ${PT_YOUTRACK_API_TOKEN:-}
+    restart: unless-stopped
+
+  # Optional: run Ollama inside Docker.
+  # Start with: docker compose --profile ollama up -d
+  ollama:
+    profiles: [ollama]
+    image: ollama/ollama
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+    # Uncomment for GPU acceleration (Linux + NVIDIA Container Toolkit required):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+volumes:
+  ph-data:
+  ph-repos:
+  ollama-models:

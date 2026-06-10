@@ -113,7 +113,7 @@ export default function Layout() {
 
   const navItems = [
     ...coreNavItems,
-    ...(features?.youtrack ? [{ to: '/boards', label: 'Activity' }] : []),
+    { to: '/boards', label: 'Activity' },
     { to: '/settings', label: 'Settings' },
   ];
 

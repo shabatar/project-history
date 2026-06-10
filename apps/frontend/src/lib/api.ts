@@ -94,6 +94,18 @@ export async function parseCommits(
   return data;
 }
 
+export async function parseBranchDiffCommits(
+  repositoryId: string,
+  branch: string,
+  baseBranch: string,
+): Promise<Commit[]> {
+  const { data } = await client.post<Commit[]>(
+    `/repositories/${repositoryId}/commits/branch-diff`,
+    { branch, base_branch: baseBranch },
+  );
+  return data;
+}
+
 // ── Summaries ──
 
 export async function createSummary(
@@ -732,6 +744,7 @@ export interface ActivitySnapshot {
   since: string;
   until: string;
   activity_count: number;
+  view_mode: 'timeline' | 'by-issue';
   user_label: string | null;
   created_at: string;
 }
@@ -755,6 +768,7 @@ export async function saveActivitySnapshot(body: {
   source_name: string;
   since: string;
   until: string;
+  view_mode: 'timeline' | 'by-issue';
   activities: ActivityItem[];
 }): Promise<ActivitySnapshot> {
   const { data } = await client.post<ActivitySnapshot>('/youtrack/activity-snapshots', body);

@@ -72,5 +72,6 @@ export interface LocalSettings {
   defaultModel: string;
   issueTrackerType: IssueTrackerType;
   issueTrackerUrl: string;  // e.g. https://youtrack.example.com or https://jira.example.com
+  savedQuestions: string[];
 }
 

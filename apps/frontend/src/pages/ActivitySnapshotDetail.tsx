@@ -5,10 +5,9 @@ import dayjs from 'dayjs';
 import * as api from '../lib/api';
 import { CommentsSection } from '../components/CommentsSection';
 import { EditableTitle } from '../components/EditableTitle';
-import { ActivityEventsTable } from '../components/ActivityEventsTable';
+import { TimelineView, ByIssueView } from './activity-flow/components';
 import { useAppStore } from '../store';
 
-const PAGE_SIZE = 100;
 
 export default function ActivitySnapshotDetail() {
   const { snapshotId } = useParams<{ snapshotId: string }>();
@@ -29,6 +28,7 @@ export default function ActivitySnapshotDetail() {
     staleTime: Infinity,
   });
 
+  const [view, setView] = useState<'timeline' | 'by-issue' | null>(null);
   const [typeFilter, setTypeFilter] = useState<string>('all');
   const [search, setSearch] = useState('');
 
@@ -113,19 +113,30 @@ export default function ActivitySnapshotDetail() {
         {filtered.length !== activities.length && (
           <span className="snap-detail-filtered">{filtered.length} matching</span>
         )}
+        <div className="pf-view-toggle" style={{ marginLeft: 'auto' }}>
+          <button
+            className={`pf-view-btn${(view ?? snap.view_mode) === 'timeline' ? ' active' : ''}`}
+            onClick={() => setView('timeline')}
+          >
+            Timeline
+          </button>
+          <button
+            className={`pf-view-btn${(view ?? snap.view_mode) === 'by-issue' ? ' active' : ''}`}
+            onClick={() => setView('by-issue')}
+          >
+            By issue
+          </button>
+        </div>
       </div>
 
       {rawLoading ? (
         <div className="empty-state"><p>Loading events…</p></div>
       ) : filtered.length === 0 ? (
         <div className="empty-state"><p>No events match the current filter.</p></div>
+      ) : (view ?? snap.view_mode) === 'by-issue' ? (
+        <ByIssueView items={filtered} ytBase={ytBaseUrl} />
       ) : (
-        <ActivityEventsTable
-          events={filtered}
-          ytBaseUrl={ytBaseUrl}
-          pageSize={PAGE_SIZE}
-          extraClass="snap-detail-events"
-        />
+        <TimelineView items={filtered} ytBase={ytBaseUrl} />
       )}
 
       <div className="snap-detail-comments">
