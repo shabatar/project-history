@@ -59,14 +59,14 @@ describe('Settings', () => {
     expect(select).toBeInTheDocument();
   });
 
-  it('renders summary style selector with options Short, Detailed, Briefly', async () => {
+  it('renders summary style selector with options Brief, Detailed, Custom prompt', async () => {
     const { default: Settings } = await import('../pages/Settings');
     renderWithProviders(<Settings />);
     const select = screen.getByLabelText('Default Summary Style');
     expect(select).toBeInTheDocument();
-    expect(screen.getByText('Short')).toBeInTheDocument();
-    expect(screen.getByText('Detailed (engineering)')).toBeInTheDocument();
-    expect(screen.getByText('Briefly')).toBeInTheDocument();
+    expect(screen.getByText('Brief')).toBeInTheDocument();
+    expect(screen.getByText('Detailed')).toBeInTheDocument();
+    expect(screen.getByText('Custom prompt')).toBeInTheDocument();
   });
 
   it('renders issue tracker type selector', async () => {

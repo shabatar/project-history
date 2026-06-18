@@ -13,7 +13,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from datetime import date, datetime
+import time
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -25,31 +26,21 @@ from app.repositories.repo_repository import RepoRepository
 
 logger = logging.getLogger(__name__)
 
-# ── Delimiters ──
-# Using NUL-based record/field separators avoids collisions with any content
-# that can appear in commit messages.  git's %x00 emits a literal NUL byte.
-_RECORD_SEP = "%x00%x00RECORD%x00%x00"  # between commits
-_FIELD_SEP = "%x00FIELD%x00"  # between fields inside one commit
+_RECORD_SEP = "%x00%x00RECORD%x00%x00"
+_FIELD_SEP = "%x00FIELD%x00"
 _RECORD_SEP_RAW = "\x00\x00RECORD\x00\x00"
 _FIELD_SEP_RAW = "\x00FIELD\x00"
 
-# Fields: hash, author-name, author-email, author-date (ISO-strict), subject, body
 _GIT_LOG_FORMAT = _FIELD_SEP.join(["%H", "%an", "%ae", "%aI", "%s", "%b"]) + _RECORD_SEP
 
-# ── Low-level subprocess helper ──
 
 _GIT_ENV_ALLOWLIST = {
-    # Core system
     "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE",
     "TMPDIR", "TEMP", "TMP",
-    # SSH credentials
     "SSH_AUTH_SOCK", "SSH_AGENT_PID",
-    # Git credential helpers
     "GIT_ASKPASS", "GIT_CREDENTIAL_HELPER",
     "XDG_CONFIG_HOME", "XDG_DATA_HOME",
-    # macOS Keychain / 1Password
     "APPLE_CREDENTIAL_MANAGER",
-    # GPG
     "GPG_AGENT_INFO", "GNUPGHOME",
 }
 
@@ -66,7 +57,6 @@ def _git_env() -> dict[str, str]:
         if val is not None:
             env[key] = val
 
-    # SSH agent fallbacks for macOS/1Password
     if "SSH_AUTH_SOCK" not in env:
         for sock in [
             Path.home() / ".1password" / "agent.sock",
@@ -76,7 +66,6 @@ def _git_env() -> dict[str, str]:
                 env["SSH_AUTH_SOCK"] = str(sock)
                 break
 
-    # Custom SSH key path
     from app.config import settings
     if settings.ssh_key_path:
         key_path = Path(settings.ssh_key_path).expanduser()
@@ -84,7 +73,6 @@ def _git_env() -> dict[str, str]:
             env["GIT_SSH_COMMAND"] = f"ssh -i {key_path} -o StrictHostKeyChecking=accept-new"
 
     env["GIT_TERMINAL_PROMPT"] = "0"
-    env["GIT_CONFIG_NOSYSTEM"] = "1"
     env["GIT_ATTR_NOSYSTEM"] = "1"
     env["GIT_NO_REPLACE_OBJECTS"] = "1"
     env["GIT_CONFIG_COUNT"] = "3"
@@ -101,12 +89,16 @@ async def _run_git(
     cwd: Path,
     *,
     check: bool = True,
+    timeout: int | None = None,
 ) -> tuple[str, str, int]:
     """Run a read-only git command and return (stdout, stderr, returncode).
 
     Uses the user's native git credentials (SSH keys, credential helpers,
     keychain) via environment inheritance. Never writes credentials.
+    ``timeout`` defaults to ``settings.git_timeout``; clone/fetch pass the larger
+    ``settings.git_network_timeout`` since big repos can take a long time.
     """
+    timeout = timeout if timeout is not None else settings.git_timeout
     cmd = ["git"] + args
     logger.debug("Running: %s  (cwd=%s)", " ".join(_sanitize_cmd(cmd)), cwd)
     proc = await asyncio.create_subprocess_exec(
@@ -117,10 +109,10 @@ async def _run_git(
         env=_git_env(),
     )
     try:
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=300)
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
         proc.kill()
-        raise GitCommandError(cmd, -1, "Git command timed out after 5 minutes")
+        raise GitCommandError(cmd, -1, f"Git command timed out after {timeout}s")
     stdout = stdout_bytes.decode(errors="replace")
     stderr = stderr_bytes.decode(errors="replace")
     if check and proc.returncode != 0:
@@ -138,16 +130,45 @@ class GitCommandError(RuntimeError):
             f"git command failed (exit {code}): {' '.join(self.cmd)}\n{self.stderr.strip()}"
         )
 
+    @property
+    def is_auth_error(self) -> bool:
+        """True when the failure is a credential/permission problem (a client issue, not a server bug)."""
+        s = self.stderr.lower()
+        return any(
+            marker in s
+            for marker in (
+                "could not read username",
+                "could not read password",
+                "authentication failed",
+                "terminal prompts disabled",
+                "permission denied",
+                "access denied",
+                "invalid username or password",
+                "remote: not found",
+                "repository not found",
+                "fatal: could not read",
+            )
+        )
+
+    @property
+    def user_message(self) -> str:
+        """A concise, actionable message for the UI."""
+        if self.is_auth_error:
+            return (
+                "Couldn't authenticate to the remote over HTTPS. Make sure your git "
+                "credential helper has access to this repository (e.g. sign in once via "
+                "the terminal, or store a token in your keychain), or add it with an SSH URL."
+            )
+        return self.stderr.strip() or "Git command failed."
+
 def _sanitize_log(text: str) -> str:
     """Remove credentials from log output."""
-    # Strip credentials from URLs: https://user:token@host → https://***@host
     return re.sub(r"https://[^@]+@", "https://***@", text)
 
 def _sanitize_cmd(cmd: list[str]) -> list[str]:
     """Remove credentials from command args for logging."""
     return [re.sub(r"https://[^@]+@", "https://***@", arg) for arg in cmd]
 
-# ── URL validation ──
 
 _SAFE_URL_RE = re.compile(
     r"^(https?://[\w.\-]+/|git@[\w.\-]+:|local://)"
@@ -161,7 +182,6 @@ def validate_remote_url(url: str) -> None:
             "Use HTTPS (https://...) or SSH (git@host:...) URLs only."
         )
 
-# ── Helpers ──
 
 _SAFE_BRANCH_RE = re.compile(r"^[\w.\-/]+$")
 
@@ -181,7 +201,6 @@ def validate_branch_name(name: str) -> None:
 def _repo_name_from_url(url: str) -> str:
     name = url.rstrip("/").rsplit("/", 1)[-1]
     name = re.sub(r"\.git$", "", name)
-    # Sanitize: only alphanumeric, dash, underscore, dot — prevent path traversal
     name = re.sub(r"[^\w.\-]", "_", name)
     if not name or name.startswith("."):
         name = "repo"
@@ -226,7 +245,6 @@ def _parse_raw_commits(raw_output: str) -> list[dict]:
         )
     return entries
 
-# ── Service class ──
 
 class GitService:
     """High-level git operations backed by subprocess calls."""
@@ -236,7 +254,6 @@ class GitService:
         self._repo_repo = RepoRepository(db)
         self._commit_repo = CommitRepository(db)
 
-    # ── clone_repo ──
 
     async def clone_repo(self, repo: Repository) -> Repository:
         """Clone a remote repository into the local repos dir.
@@ -251,24 +268,32 @@ class GitService:
         if not str(path).startswith(str(repos_root)):
             raise ValueError(f"Clone path {path} is outside repos directory")
 
+        started = time.monotonic()
+        net_timeout = settings.git_network_timeout
         if path.exists():
-            logger.info("Directory exists for %s – fetching instead of cloning", repo.name)
-            await _run_git(["fetch", "--all", "--prune"], cwd=path)
+            logger.info("Fetching latest for '%s' (already cloned)…", repo.name)
+            await _run_git(["fetch", "--all", "--prune"], cwd=path, timeout=net_timeout)
+            action = "Fetched"
         else:
-            logger.info("Cloning %s", repo.name)
+            logger.info("Cloning '%s' from %s…", repo.name, _sanitize_log(repo.remote_url))
             path.parent.mkdir(parents=True, exist_ok=True)
             await _run_git(
                 ["clone", "--no-recurse-submodules", "--", repo.remote_url, str(path)],
                 cwd=path.parent,
+                timeout=net_timeout,
             )
+            action = "Cloned"
 
         branch = await self._detect_default_branch(path)
         if branch:
             self._repo_repo.update(repo, default_branch=branch)
 
+        logger.info(
+            "%s '%s' (default branch: %s) in %.1fs",
+            action, repo.name, branch or "unknown", time.monotonic() - started,
+        )
         return self._repo_repo.mark_synced(repo)
 
-    # ── update_repo ──
 
     async def update_repo(self, repo: Repository) -> Repository:
         """Fetch the latest changes for an already-cloned repository.
@@ -284,7 +309,7 @@ class GitService:
 
         logger.info("Updating %s", repo.name)
 
-        await _run_git(["fetch", "--all", "--prune"], cwd=path)
+        await _run_git(["fetch", "--all", "--prune"], cwd=path, timeout=settings.git_network_timeout)
 
         branch = await self._detect_default_branch(path)
         if branch:
@@ -296,7 +321,6 @@ class GitService:
 
         return self._repo_repo.mark_synced(repo)
 
-    # ── shared commit storage ──
 
     def _store_parsed_commits(
         self,
@@ -312,7 +336,10 @@ class GitService:
             if entry["commit_hash"] in existing_hashes:
                 continue
             try:
-                committed_at = datetime.fromisoformat(entry["date_iso"])
+                parsed_dt = datetime.fromisoformat(entry["date_iso"])
+                if parsed_dt.tzinfo is not None:
+                    parsed_dt = parsed_dt.astimezone(timezone.utc).replace(tzinfo=None)
+                committed_at = parsed_dt
             except ValueError:
                 logger.warning(
                     "Skipping commit %s: unparseable date %r",
@@ -354,7 +381,6 @@ class GitService:
             )
         return repo, path
 
-    # ── load_commits ──
 
     async def load_commits(
         self,
@@ -385,7 +411,6 @@ class GitService:
         parsed = _parse_raw_commits(stdout)
         return self._store_parsed_commits(repo_id, parsed, f"load_commits({repo.name})")
 
-    # ── get_commit_history ──
 
     def get_commit_history(
         self,
@@ -407,7 +432,55 @@ class GitService:
             limit=limit,
         )
 
-    # ── list_branches ──
+
+    async def get_branch_commits_in_range(
+        self,
+        repo_id: str,
+        branch: str,
+        start_date: str | date | None = None,
+        end_date: str | date | None = None,
+        limit: int = 5000,
+    ):
+        """Commits reachable from *branch* within a date range, read directly from
+        git and returned (not stored) — lets the date-range view target one branch,
+        since the commit DB isn't branch-aware."""
+        from app.schemas import CommitRead
+
+        repo, path = self._get_repo_and_path(repo_id)
+        validate_branch_name(branch)
+        ref = branch if branch.startswith("origin/") else f"origin/{branch}"
+        since = _resolve_start_date(start_date)
+        until = _resolve_end_date(end_date)
+
+        cmd = ["log", f"--pretty=format:{_GIT_LOG_FORMAT}", "--date-order", ref, f"--max-count={limit}"]
+        if since:
+            cmd.append(f"--since={since}")
+        cmd.append(f"--until={until}")
+
+        stdout, _, _ = await _run_git(cmd, cwd=path)
+        if not stdout.strip():
+            return []
+
+        out: list = []
+        for e in _parse_raw_commits(stdout):
+            try:
+                dt = datetime.fromisoformat(e["date_iso"])
+                if dt.tzinfo is not None:
+                    dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+            except ValueError:
+                continue
+            out.append(CommitRead(
+                id=e["commit_hash"],
+                repository_id=repo_id,
+                commit_hash=e["commit_hash"],
+                author_name=e["author_name"],
+                author_email=e["author_email"],
+                committed_at=dt,
+                subject=e["subject"],
+                body=e["body"],
+            ))
+        return out
+
 
     async def list_branches(self, repo_id: str) -> list[dict]:
         """List local and remote branches for a repository."""
@@ -428,7 +501,6 @@ class GitService:
             if len(parts) < 1 or not parts[0].strip():
                 continue
             name = parts[0].strip()
-            # Skip HEAD pointer and bare remote name
             if name in ("origin/HEAD", "origin") or not name:
                 continue
             is_remote = name.startswith("origin/")
@@ -440,7 +512,6 @@ class GitService:
                 "is_remote": is_remote,
             })
 
-        # Deduplicate: if a local and remote branch have the same name, keep one
         seen: dict[str, dict] = {}
         for b in branches:
             existing = seen.get(b["name"])
@@ -448,7 +519,6 @@ class GitService:
                 seen[b["name"]] = b
         return sorted(seen.values(), key=lambda b: b["name"])
 
-    # ── load_branch_diff_commits ──
 
     async def load_branch_diff_commits(
         self,
@@ -474,11 +544,9 @@ class GitService:
         parsed = _parse_raw_commits(stdout)
         self._store_parsed_commits(repo_id, parsed, f"branch_diff({range_spec})")
 
-        # Return ALL commits in the range (including previously stored ones)
         all_hashes = {entry["commit_hash"] for entry in parsed}
         return self._commit_repo.list_by_hashes(repo_id, all_hashes)
 
-    # ── private helpers ──
 
     async def _detect_default_branch(self, path: Path) -> str | None:
         """Try to detect the default branch name.
@@ -487,17 +555,14 @@ class GitService:
           1. Check the symbolic-ref of origin/HEAD (set after clone).
           2. Fall back to the currently checked-out branch.
         """
-        # Try origin/HEAD first – most reliable after a fresh clone.
         stdout, _, rc = await _run_git(
             ["symbolic-ref", "refs/remotes/origin/HEAD"],
             cwd=path,
             check=False,
         )
         if rc == 0 and stdout.strip():
-            # Output looks like "refs/remotes/origin/main"
             return stdout.strip().rsplit("/", 1)[-1]
 
-        # Fallback: current HEAD branch
         stdout, _, rc = await _run_git(
             ["rev-parse", "--abbrev-ref", "HEAD"],
             cwd=path,
@@ -508,7 +573,6 @@ class GitService:
 
         return None
 
-# ── Module-level convenience (used by routers for add) ──
 
 _MAX_REPOS = 50
 
@@ -519,7 +583,6 @@ def add_repository(remote_url: str, db: Session) -> Repository:
         raise ValueError(f"Maximum of {_MAX_REPOS} repositories reached")
     name = _repo_name_from_url(remote_url)
     local_path = (settings.repos_dir / name).resolve()
-    # Ensure path stays within repos_dir (prevent path traversal)
     if not str(local_path).startswith(str(settings.repos_dir.resolve())):
         raise ValueError("Repository name resolves outside repos directory")
     return RepoRepository(db).create(name, remote_url, str(local_path))
@@ -543,7 +606,6 @@ async def add_local_repository(local_path: str, db: Session) -> Repository:
     if not git_dir.is_dir():
         raise ValueError(f"Not a git repository (no .git directory): {path}")
 
-    # Read remote URL
     stdout, _, rc = await _run_git(
         ["config", "--get", "remote.origin.url"],
         cwd=path,
@@ -553,13 +615,11 @@ async def add_local_repository(local_path: str, db: Session) -> Repository:
     if not remote_url:
         remote_url = f"local://{path}"
 
-    # Check duplicate
     repo_repo = RepoRepository(db)
     existing = repo_repo.get_by_url(remote_url)
     if existing:
         raise ValueError(f"Repository with URL '{remote_url}' already exists")
 
-    # Also check duplicate by path
     existing_by_path = (
         db.query(Repository)
         .filter(Repository.local_path == str(path))
@@ -568,7 +628,6 @@ async def add_local_repository(local_path: str, db: Session) -> Repository:
     if existing_by_path:
         raise ValueError(f"Repository at path '{path}' already tracked")
 
-    # Detect branch
     stdout, _, rc = await _run_git(
         ["rev-parse", "--abbrev-ref", "HEAD"],
         cwd=path,
@@ -576,7 +635,6 @@ async def add_local_repository(local_path: str, db: Session) -> Repository:
     )
     branch = stdout.strip() if rc == 0 and stdout.strip() != "HEAD" else "main"
 
-    # Infer name from directory
     name = path.name
 
     repo = repo_repo.create(name, remote_url, str(path))

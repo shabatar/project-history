@@ -6,6 +6,10 @@ import * as api from '../lib/api';
 import { CommentsSection } from '../components/CommentsSection';
 import { EditableTitle } from '../components/EditableTitle';
 import { TimelineView, ByIssueView } from './activity-flow/components';
+import { CollapsibleSection } from '../components/ReportContent';
+import { MultiTextFilter, matchesTerms } from '../components/MultiTextFilter';
+import { activityItemsToText } from '../lib/activityText';
+import { usePersistentState } from '../lib/usePersistentState';
 import { useAppStore } from '../store';
 
 
@@ -29,25 +33,23 @@ export default function ActivitySnapshotDetail() {
   });
 
   const [view, setView] = useState<'timeline' | 'by-issue' | null>(null);
-  const [typeFilter, setTypeFilter] = useState<string>('all');
-  const [search, setSearch] = useState('');
+  // Filter settings persist per snapshot.
+  const [typeFilter, setTypeFilter] = usePersistentState<string>(
+    snapshotId ? `snap-type:${snapshotId}` : null, 'all',
+  );
+  const [terms, setTerms] = usePersistentState<string[]>(
+    snapshotId ? `snap-filter:${snapshotId}` : null, [],
+  );
 
   const activities = rawData?.activities ?? [];
 
   const filtered = activities.filter((ev) => {
     if (typeFilter !== 'all' && ev.activity_type !== typeFilter) return false;
-    if (search) {
-      const q = search.toLowerCase();
-      return (
-        ev.issue_id.toLowerCase().includes(q) ||
-        ev.issue_summary?.toLowerCase().includes(q) ||
-        ev.author.toLowerCase().includes(q) ||
-        ev.comment_text?.toLowerCase().includes(q) ||
-        ev.new_value?.toLowerCase().includes(q) ||
-        ev.field?.toLowerCase().includes(q)
-      );
-    }
-    return true;
+    // OR across include terms, minus any "-" exclusions, over the event's fields.
+    const hay = [
+      ev.issue_id, ev.issue_summary, ev.author, ev.comment_text, ev.old_value, ev.new_value, ev.field,
+    ].filter(Boolean).join(' ');
+    return matchesTerms(hay, terms);
   });
 
   const typeCounts = activities.reduce<Record<string, number>>((acc, ev) => {
@@ -88,11 +90,11 @@ export default function ActivitySnapshotDetail() {
       </div>
 
       <div className="snap-detail-filters">
-        <input
-          className="input snap-detail-search"
-          placeholder="Search issue, author, field…"
-          value={search}
-          onChange={(e) => { setSearch(e.target.value); }}
+        <MultiTextFilter
+          className="snap-detail-search"
+          placeholder="Filter… (Enter to add, -term to exclude)"
+          chips={terms}
+          onChange={setTerms}
         />
         <div className="snap-type-chips">
           {['all', 'created', 'resolved', 'field_change', 'comment'].map((t) => {
@@ -133,14 +135,25 @@ export default function ActivitySnapshotDetail() {
         <div className="empty-state"><p>Loading events…</p></div>
       ) : filtered.length === 0 ? (
         <div className="empty-state"><p>No events match the current filter.</p></div>
-      ) : (view ?? snap.view_mode) === 'by-issue' ? (
-        <ByIssueView items={filtered} ytBase={ytBaseUrl} />
       ) : (
-        <TimelineView items={filtered} ytBase={ytBaseUrl} />
+        <CollapsibleSection
+          copyText={activityItemsToText(filtered)}
+          collapsedNote={`${filtered.length} event${filtered.length !== 1 ? 's' : ''} collapsed — click Expand to show.`}
+        >
+          {(view ?? snap.view_mode) === 'by-issue' ? (
+            <ByIssueView items={filtered} ytBase={ytBaseUrl} />
+          ) : (
+            <TimelineView items={filtered} ytBase={ytBaseUrl} />
+          )}
+        </CollapsibleSection>
       )}
 
       <div className="snap-detail-comments">
-        <CommentsSection summaryType="activity-snapshot" summaryId={snap.id} />
+        <CommentsSection
+          summaryType="activity-snapshot"
+          summaryId={snap.id}
+          generateParams={{ filter: terms, type: typeFilter !== 'all' ? typeFilter : undefined }}
+        />
       </div>
     </div>
   );

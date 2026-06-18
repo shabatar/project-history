@@ -1,6 +1,8 @@
 import { useState, useMemo, useCallback } from 'react';
 import dayjs from 'dayjs';
 import type { Commit, Repository } from '../types';
+import { commitLink } from '../lib/linkify';
+import { renderWithIssueLinks } from '../lib/issueLinks';
 
 // ── Category inference ──
 
@@ -99,6 +101,8 @@ interface Props {
   showRepoColumn?: boolean;
   repoMap?: Map<string, Repository>;
   compact?: boolean;
+  /** Hide the built-in search box (when the caller provides its own filtering). */
+  hideSearch?: boolean;
 }
 
 export default function CommitTable({
@@ -108,6 +112,7 @@ export default function CommitTable({
   showRepoColumn,
   repoMap,
   compact,
+  hideSearch,
 }: Props) {
   const [expandedSha, setExpandedSha] = useState<string | null>(null);
   const [searchText, setSearchText] = useState('');
@@ -191,18 +196,20 @@ export default function CommitTable({
   return (
     <div className={compact ? 'ct-compact' : ''}>
       {/* ── Search ── */}
-      <div className="ct-search-row">
-        <input
-          type="text"
-          className="input ct-search"
-          placeholder="Search commits..."
-          value={searchText}
-          onChange={(e) => setSearchText(e.target.value)}
-        />
-        {searchText && (
-          <span className="ce-count">{filtered.length}/{commits.length}</span>
-        )}
-      </div>
+      {!hideSearch && (
+        <div className="ct-search-row">
+          <input
+            type="text"
+            className="input ct-search"
+            placeholder="Search commits..."
+            value={searchText}
+            onChange={(e) => setSearchText(e.target.value)}
+          />
+          {searchText && (
+            <span className="ce-count">{filtered.length}/{commits.length}</span>
+          )}
+        </div>
+      )}
 
       {/* ── Selection bar ── */}
       {selectedHashes.size > 0 && (
@@ -317,6 +324,7 @@ function DayGroupRows({
         const isExpanded = expandedSha === commit.commit_hash;
         const isSelected = selectedHashes.has(commit.commit_hash);
         const category = inferCategory(commit.subject);
+        const shaHref = commitLink(repoMap?.get(commit.repository_id)?.remote_url, commit.commit_hash);
 
         return (
           <tr
@@ -338,14 +346,27 @@ function DayGroupRows({
             )}
             <td className="ct-main-cell">
               <div className="ct-commit-line">
-                <span className="commit-sha">{commit.commit_hash.slice(0, 7)}</span>
+                {shaHref ? (
+                  <a
+                    className="commit-sha commit-sha-link"
+                    href={shaHref}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title={`View commit ${commit.commit_hash.slice(0, 7)} on remote`}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    {commit.commit_hash.slice(0, 7)}
+                  </a>
+                ) : (
+                  <span className="commit-sha">{commit.commit_hash.slice(0, 7)}</span>
+                )}
                 {category && (
                   <span className={`commit-badge ${CATEGORY_CONFIG[category].className}`}>
                     {CATEGORY_CONFIG[category].label}
                   </span>
                 )}
                 <span className="commit-message" title={commit.subject}>
-                  {commit.subject}
+                  {renderWithIssueLinks(commit.subject)}
                 </span>
                 <span className="commit-author">{commit.author_name}</span>
                 <span className="commit-date">{dayjs(commit.committed_at).format('HH:mm')}</span>
@@ -353,7 +374,7 @@ function DayGroupRows({
               {isExpanded && (
                 <div className="commit-detail">
                   {commit.body && (
-                    <pre className="commit-body">{commit.body}</pre>
+                    <pre className="commit-body">{renderWithIssueLinks(commit.body)}</pre>
                   )}
                   <div className="commit-detail-meta">
                     <span><code>{commit.commit_hash}</code></span>

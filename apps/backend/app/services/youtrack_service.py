@@ -2,8 +2,6 @@
 
 import logging
 import re
-import threading
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from typing import Callable
@@ -12,84 +10,6 @@ import httpx
 from sqlalchemy.orm import Session
 
 _ACTIVITY_FETCH_WORKERS = 10
-
-# ── Server-side activity cache ─────────────────────────────────────────
-# Short-lived memoization so summarize doesn't re-hit YouTrack for an
-# activity set the user just fetched. Keyed by (sorted project_ids tuple,
-# since_ts, until_ts). TTL is intentionally short — YouTrack data can
-# change mid-session, so we only absorb the "fetch then summarize" burst.
-
-_ACTIVITY_CACHE_TTL_S = 600  # 10 minutes
-_activity_cache_lock = threading.Lock()
-_activity_cache: dict[tuple, tuple[float, list]] = {}
-
-
-def _activity_cache_key(project_ids: list[str], since_ts: int, until_ts: int) -> tuple:
-    return (tuple(sorted(project_ids)), since_ts, until_ts)
-
-
-def get_cached_activities(
-    project_ids: list[str], since_ts: int, until_ts: int,
-):
-    """Return cached ActivityItem list if fresh, else None."""
-    key = _activity_cache_key(project_ids, since_ts, until_ts)
-    with _activity_cache_lock:
-        entry = _activity_cache.get(key)
-        if entry is None:
-            return None
-        cached_at, items = entry
-        if time.monotonic() - cached_at > _ACTIVITY_CACHE_TTL_S:
-            _activity_cache.pop(key, None)
-            return None
-    return items
-
-
-def _store_activities_in_cache(
-    project_ids: list[str], since_ts: int, until_ts: int, items: list,
-) -> None:
-    key = _activity_cache_key(project_ids, since_ts, until_ts)
-    with _activity_cache_lock:
-        # Bound the cache size to keep memory predictable — evict oldest.
-        if len(_activity_cache) >= 64:
-            oldest = min(_activity_cache.items(), key=lambda kv: kv[1][0])[0]
-            _activity_cache.pop(oldest, None)
-        _activity_cache[key] = (time.monotonic(), items)
-
-
-def fetch_activities_cached(
-    base_url: str,
-    token: str,
-    project_ids: list[str],
-    since_ts: int,
-    until_ts: int,
-    should_stop: Callable[[], bool] | None = None,
-    on_progress: Callable[[dict], None] | None = None,
-):
-    """Cache-aware wrapper around fetch_activities.
-
-    If a fresh cached result exists for this (project_ids, since, until)
-    tuple, return it immediately and emit a single synthetic progress event
-    so the streaming UI still has something to show. Otherwise delegate to
-    the network-hitting fetch_activities.
-    """
-    cached = get_cached_activities(project_ids, since_ts, until_ts)
-    if cached is not None:
-        logger.info(
-            "fetch_activities_cached: cache hit (%d events, projects=%s)",
-            len(cached), project_ids,
-        )
-        if on_progress:
-            on_progress({
-                "phase": "cache_hit",
-                "done": len(cached),
-                "total": len(cached),
-                "events_so_far": len(cached),
-            })
-        return cached
-    return fetch_activities(
-        base_url, token, project_ids, since_ts, until_ts,
-        should_stop=should_stop, on_progress=on_progress,
-    )
 
 from app.models import YouTrackBoard, YouTrackConfig, YouTrackIssueSnapshot
 from app.schemas import ActivityItem, IssueChange
@@ -149,7 +69,6 @@ def fetch_board_issues(base_url: str, token: str, board_id: str) -> list[dict]:
     """
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
-    # Step 1: resolve the board's project shortName
     r = httpx.get(
         f"{base_url}/api/agiles/{board_id}",
         headers=headers,
@@ -163,7 +82,6 @@ def fetch_board_issues(base_url: str, token: str, board_id: str) -> list[dict]:
 
     project_short = projects[0].get("shortName", "")
 
-    # Step 2: flat issues query — no nested sprints expansion
     r2 = httpx.get(
         f"{base_url}/api/issues",
         headers=headers,
@@ -213,7 +131,6 @@ def sync_board(
     token = resolve_token(db)
     now = datetime.now(UTC)
 
-    # Get previous snapshots (optionally filtered by date)
     q = (
         db.query(YouTrackIssueSnapshot)
         .filter(YouTrackIssueSnapshot.board_id == board.id)
@@ -222,13 +139,11 @@ def sync_board(
         q = q.filter(YouTrackIssueSnapshot.synced_at <= since)
     prev_snapshots = q.order_by(YouTrackIssueSnapshot.synced_at.desc()).all()
 
-    # Deduplicate to latest per issue_id
     prev_by_id: dict[str, YouTrackIssueSnapshot] = {}
     for snap in prev_snapshots:
         if snap.issue_id not in prev_by_id:
             prev_by_id[snap.issue_id] = snap
 
-    # Fetch current issues from YouTrack
     try:
         current_issues = fetch_board_issues(config.base_url, token, board.board_id)
     except Exception as e:
@@ -239,7 +154,6 @@ def sync_board(
 
     changes: list[IssueChange] = []
 
-    # Detect added and updated
     for issue_id, iss in current_by_id.items():
         prev = prev_by_id.get(issue_id)
         if not prev:
@@ -264,7 +178,6 @@ def sync_board(
                     new_assignee=iss.get("assignee") if assignee_changed else None,
                 ))
 
-    # Detect removed
     for issue_id, prev in prev_by_id.items():
         if issue_id not in current_by_id:
             changes.append(IssueChange(
@@ -274,7 +187,6 @@ def sync_board(
                 old_state=prev.state,
             ))
 
-    # Store new snapshots
     for iss in current_issues:
         snap = YouTrackIssueSnapshot(
             board_id=board.id,
@@ -361,13 +273,11 @@ def fetch_activities(
     """
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
-    # Build query: issues updated in the date range for the given projects
     project_filter = " ".join(f"project: {{{pid}}}" for pid in project_ids)
     since_str = datetime.fromtimestamp(since_ts / 1000, tz=UTC).strftime("%Y-%m-%d")
     until_str = datetime.fromtimestamp(until_ts / 1000, tz=UTC).strftime("%Y-%m-%d")
     query = f"{project_filter} updated: {since_str} .. {until_str}"
 
-    # Step 1: Get issues updated in the date range
     if on_progress:
         on_progress({"phase": "listing_issues", "done": 0, "total": 0, "events_so_far": 0})
     r = httpx.get(
@@ -406,8 +316,6 @@ def fetch_activities(
             logger.warning("Failed to fetch activities for %s: %s", issue_id_readable, e)
             return []
 
-    # Step 2: fetch per-issue activities in parallel. Progress reports are
-    # emitted on each completion, so the client sees incremental updates.
     cancelled = False
     with ThreadPoolExecutor(max_workers=_ACTIVITY_FETCH_WORKERS) as pool:
         futures = {pool.submit(_fetch_one, issue): idx for idx, issue in enumerate(issues)}
@@ -415,15 +323,13 @@ def fetch_activities(
         for future in as_completed(futures):
             if should_stop and should_stop():
                 cancelled = True
-                # Best-effort: cancel any still-pending futures; running ones
-                # will finish but we won't wait for more progress events.
                 for f in futures:
                     if not f.done():
                         f.cancel()
                 break
             try:
                 all_items.extend(future.result())
-            except Exception as e:  # already logged in _fetch_one, but be safe
+            except Exception as e:
                 logger.warning("Activity future raised: %s", e)
             completed += 1
             if on_progress and (completed == total or completed % 5 == 0):
@@ -441,11 +347,6 @@ def fetch_activities(
             on_progress({"phase": "cancelled", "done": completed, "total": total, "events_so_far": len(all_items)})
 
     all_items.sort(key=lambda a: a.timestamp, reverse=True)
-
-    # Populate server-side cache only on a clean (non-cancelled) fetch.
-    if not cancelled:
-        _store_activities_in_cache(project_ids, since_ts, until_ts, all_items)
-
     return all_items
 
 def _fetch_issue_activities(
@@ -503,13 +404,11 @@ def _parse_activity(raw: dict, issue_id: str, issue_summary: str) -> ActivityIte
     author_login = author_data.get("login") or None
     author = author_data.get("name") or author_login or ""
 
-    # Category detection: prefer category.id, fall back to activity $type
     category = raw.get("category") or {}
     cat_id = category.get("id", "")
     act_type = raw.get("$type", "")
     cat_key = cat_id or act_type
 
-    # Human-readable field name: field.name > memberName > targetMember
     field_obj = raw.get("field") or {}
     field_name = field_obj.get("name", "") or raw.get("memberName", "") or raw.get("targetMember", "")
 
@@ -610,7 +509,6 @@ def _extract_field_value(items) -> str | None:
     return str(items) if items else None
 
 
-# ── Issue tracking helpers ─────────────────────────────────────────────
 
 def _parse_issue_fields(issue: dict) -> dict:
     """Normalize a raw YouTrack issue object into a flat dict."""

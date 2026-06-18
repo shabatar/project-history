@@ -5,7 +5,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-import app.models  # noqa: F401 — register models with Base
+import app.models
 from app.database import Base, get_db
 from app.main import app
 
@@ -15,7 +15,6 @@ _test_engine = create_engine(
     poolclass=StaticPool,
 )
 
-# SQLite needs foreign key enforcement turned on per-connection.
 @event.listens_for(_test_engine, "connect")
 def _set_sqlite_pragma(dbapi_connection, connection_record):
     cursor = dbapi_connection.cursor()
@@ -27,8 +26,19 @@ _TestSession = sessionmaker(bind=_test_engine, autoflush=False, expire_on_commit
 
 
 @pytest.fixture(autouse=True)
-def db():
-    """Create fresh tables for every test, yield a session, then drop."""
+def db(monkeypatch):
+    """Create fresh tables for every test, yield a session, then drop.
+
+    Background summary jobs open their own session via ``database.SessionLocal``
+    and normally run on the event loop; point that at the in-memory test engine
+    and run them inline so endpoint responses are deterministic in tests.
+    """
+    import app.database as database
+    from app.services import job_manager
+
+    monkeypatch.setattr(database, "SessionLocal", _TestSession)
+    monkeypatch.setattr(job_manager, "run_inline", True)
+
     Base.metadata.create_all(bind=_test_engine)
     session = _TestSession()
     try:
@@ -55,8 +65,6 @@ def client(db):
 
     from starlette.testclient import TestClient
 
-    # raise_server_exceptions=True propagates errors; setting lifespan to
-    # not run avoids the production init_db() call.
     with TestClient(app, raise_server_exceptions=True) as c:
         yield c
     app.dependency_overrides.clear()

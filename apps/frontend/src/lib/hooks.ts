@@ -100,14 +100,20 @@ export function useAutoParseOnce(
   }, [repoId, dateRange.from, dateRange.to]);
 }
 
+// Load a generous slice so browsing/searching isn't silently capped at the
+// backend default. The backend ceiling is 20k; 5k keeps the table responsive.
+// Also used as the "save as snapshot" cap so the two always match.
+export const COMMIT_BROWSE_LIMIT = 5000;
+
 export function useCommits(
   repositoryId: string | null,
   since?: string,
   until?: string,
+  branch?: string,
 ) {
   return useQuery<Commit[]>({
-    queryKey: ['commits', repositoryId, since, until],
-    queryFn: () => api.listCommits(repositoryId!, since, until),
+    queryKey: ['commits', repositoryId, since, until, branch ?? ''],
+    queryFn: () => api.listCommits(repositoryId!, since, until, COMMIT_BROWSE_LIMIT, branch),
     enabled: !!repositoryId,
   });
 }
@@ -118,6 +124,12 @@ export function useSummaries(repositoryId?: string | null) {
   return useQuery<SummaryJob[]>({
     queryKey: ['summaries', repositoryId ?? 'all'],
     queryFn: () => api.listSummaries(repositoryId ?? undefined),
+    // Reports generate in the background — poll while any job is in flight so
+    // a running report updates to completed/failed on its own (incl. after a refresh).
+    refetchInterval: (query) =>
+      (query.state.data ?? []).some((j) => j.status === 'pending' || j.status === 'running')
+        ? 2500
+        : false,
   });
 }
 

@@ -20,8 +20,10 @@ def _to_read(repo: Repository, repo_repo: RepoRepository) -> RepositoryRead:
         id=repo.id,
         name=repo.name,
         remote_url=repo.remote_url,
+        local_path=repo.local_path,
         default_branch=repo.default_branch,
         last_synced_at=repo.last_synced_at,
+        last_sync_error=repo.last_sync_error,
         is_active=repo.is_active,
         commit_count=repo_repo.commit_count(repo.id),
     )
@@ -32,7 +34,6 @@ def _get_or_404(repo_repo: RepoRepository, repo_id: str) -> Repository:
         raise HTTPException(status_code=404, detail="Repository not found")
     return repo
 
-# ── CRUD ──
 
 @router.get("", response_model=list[RepositoryRead])
 def list_repositories(db: Session = Depends(get_db)):
@@ -80,7 +81,6 @@ def delete_repository(repo_id: str, db: Session = Depends(get_db)):
     repo = _get_or_404(repo_repo, repo_id)
     repo_repo.delete(repo)
 
-# ── Open in file manager ──
 
 @router.post("/{repo_id}/open")
 async def open_in_file_manager(repo_id: str, db: Session = Depends(get_db)):
@@ -92,7 +92,6 @@ async def open_in_file_manager(repo_id: str, db: Session = Depends(get_db)):
     if not path.is_dir():
         raise HTTPException(status_code=422, detail="Local path does not exist")
 
-    # Sandbox: only allow opening paths within known directories
     from app.config import settings
     allowed_roots = [Path(settings.repos_dir).resolve(), Path.home()]
     if not any(path == root or root in path.parents for root in allowed_roots):
@@ -119,7 +118,6 @@ async def open_in_file_manager(repo_id: str, db: Session = Depends(get_db)):
 
     return {"opened": str(path)}
 
-# ── Single-repo git actions ──
 
 @router.post("/{repo_id}/clone", response_model=RepositoryRead)
 async def clone_repo(repo_id: str, db: Session = Depends(get_db)):
@@ -129,7 +127,8 @@ async def clone_repo(repo_id: str, db: Session = Depends(get_db)):
         repo = await GitService(db).clone_repo(repo)
     except GitCommandError as exc:
         repo_repo.set_sync_error(repo, str(exc))
-        raise HTTPException(status_code=500, detail=str(exc))
+        status = 422 if exc.is_auth_error else 500
+        raise HTTPException(status_code=status, detail=exc.user_message)
     return _to_read(repo, repo_repo)
 
 @router.post("/{repo_id}/pull", response_model=RepositoryRead)
@@ -140,7 +139,8 @@ async def pull_repo(repo_id: str, db: Session = Depends(get_db)):
         repo = await GitService(db).update_repo(repo)
     except GitCommandError as exc:
         repo_repo.set_sync_error(repo, str(exc))
-        raise HTTPException(status_code=500, detail=str(exc))
+        status = 422 if exc.is_auth_error else 500
+        raise HTTPException(status_code=status, detail=exc.user_message)
     return _to_read(repo, repo_repo)
 
 @router.post("/{repo_id}/refresh-commits", response_model=RepositoryRead)
@@ -156,7 +156,6 @@ async def refresh_commits(repo_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(exc))
     return _to_read(repo, repo_repo)
 
-# ── Bulk actions ──
 
 @router.post("/bulk/clone", response_model=BulkActionResult)
 async def bulk_clone(db: Session = Depends(get_db)):

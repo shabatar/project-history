@@ -4,6 +4,7 @@ import dayjs from 'dayjs';
 import * as api from '../lib/api';
 import { useRepositories } from '../lib/hooks';
 import { renderMarkdown } from '../components/SummaryPanel';
+import { ReportContent } from '../components/ReportContent';
 import { CommentsSection } from '../components/CommentsSection';
 import { EditableTitle } from '../components/EditableTitle';
 import type { SummaryJob } from '../types';
@@ -23,6 +24,9 @@ export default function SummaryDetail() {
     queryKey: ['summary', jobId],
     queryFn: () => api.getSummary(jobId!),
     enabled: !!jobId,
+    // Poll while the report is still generating in the background.
+    refetchInterval: (query) =>
+      query.state.data?.status === 'pending' || query.state.data?.status === 'running' ? 2500 : false,
   });
 
   const { data: repos = [] } = useRepositories();
@@ -94,25 +98,42 @@ export default function SummaryDetail() {
         </span>
       </div>
 
+      {job.custom_prompt && (
+        <p className="yt-summary-custom-prompt summ-detail-prompt">
+          <em>Prompt:</em> {job.custom_prompt}
+        </p>
+      )}
+
       {job.result && (
         <div className="detail-report-body">
-          <div
+          <ReportContent
             className="report-content"
-            dangerouslySetInnerHTML={{
-              __html: renderMarkdown(
-                job.result.summary_markdown,
-                repoContext,
-              ),
-            }}
+            markdown={job.result.summary_markdown}
+            html={renderMarkdown(job.result.summary_markdown, repoContext)}
           />
+        </div>
+      )}
+
+      {(job.status === 'pending' || job.status === 'running') && (
+        <div className="report-generating">
+          <span className="sai-spinner" /> Generating report in the background… this page updates automatically.
+          <button className="sai-cancel-btn" style={{ marginLeft: 12 }} onClick={async () => {
+            await api.cancelSummary(job.id);
+            qc.invalidateQueries({ queryKey: ['summary', jobId] });
+          }}>
+            Cancel
+          </button>
         </div>
       )}
 
       {job.status === 'failed' && (
         <div className="report-error">
-          Summary generation failed. Check that Ollama is running and the
-          model is available.
+          {job.error || 'Summary generation failed. Check that Ollama is running and the model is available.'}
         </div>
+      )}
+
+      {job.status === 'cancelled' && (
+        <div className="report-error">{job.error || 'Summary generation was cancelled.'}</div>
       )}
 
       {job.status === 'completed' && (

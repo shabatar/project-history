@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import dayjs from 'dayjs';
@@ -6,6 +5,9 @@ import * as api from '../lib/api';
 import { CommentsSection } from '../components/CommentsSection';
 import { EditableTitle } from '../components/EditableTitle';
 import { CommitSnapshotTable } from '../components/CommitSnapshotTable';
+import { CollapsibleSection } from '../components/ReportContent';
+import { MultiTextFilter, matchesTerms } from '../components/MultiTextFilter';
+import { usePersistentState } from '../lib/usePersistentState';
 
 export default function CommitSnapshotDetail() {
   const { snapshotId } = useParams<{ snapshotId: string }>();
@@ -24,20 +26,19 @@ export default function CommitSnapshotDetail() {
     staleTime: Infinity,
   });
 
-  const [search, setSearch] = useState('');
+  const [terms, setTerms] = usePersistentState<string[]>(
+    snapshotId ? `commit-snap-filter:${snapshotId}` : null, [],
+  );
 
   const commits = rawData?.commits ?? [];
 
-  const filtered = search
-    ? commits.filter((c) => {
-        const q = search.toLowerCase();
-        return (
-          c.subject.toLowerCase().includes(q) ||
-          c.author_name.toLowerCase().includes(q) ||
-          c.commit_hash.toLowerCase().includes(q)
-        );
-      })
-    : commits;
+  const filtered = commits.filter((c) =>
+    matchesTerms(
+      // Include the date (ISO + display formats) so a date substring filters too.
+      `${c.subject} ${c.author_name} ${c.commit_hash} ${c.committed_at ? dayjs(c.committed_at).format('YYYY-MM-DD MMM D, YYYY HH:mm') : ''}`,
+      terms,
+    ),
+  );
 
   if (snapLoading) return <div className="page"><p>Loading…</p></div>;
   if (!snap) return (
@@ -74,11 +75,11 @@ export default function CommitSnapshotDetail() {
       </div>
 
       <div className="snap-detail-filters">
-        <input
-          className="input snap-detail-search"
-          placeholder="Search commit, author, hash…"
-          value={search}
-          onChange={(e) => { setSearch(e.target.value); }}
+        <MultiTextFilter
+          className="snap-detail-search"
+          placeholder="Filter… (Enter to add, -term to exclude)"
+          chips={terms}
+          onChange={setTerms}
         />
         {filtered.length !== commits.length && (
           <span className="snap-detail-filtered">{filtered.length} matching</span>
@@ -90,14 +91,25 @@ export default function CommitSnapshotDetail() {
       ) : filtered.length === 0 ? (
         <div className="empty-state"><p>No commits match the current filter.</p></div>
       ) : (
-        <CommitSnapshotTable
-          commits={filtered}
-          extraClass="snap-detail-events"
-        />
+        <CollapsibleSection
+          copyText={filtered
+            .map((c) => `- ${c.commit_hash.slice(0, 7)} ${c.subject} (${c.author_name}, ${dayjs(c.committed_at).format('YYYY-MM-DD')})`)
+            .join('\n')}
+          collapsedNote={`${filtered.length} commit${filtered.length !== 1 ? 's' : ''} collapsed — click Expand to show.`}
+        >
+          <CommitSnapshotTable
+            commits={filtered}
+            extraClass="snap-detail-events"
+          />
+        </CollapsibleSection>
       )}
 
       <div className="snap-detail-comments">
-        <CommentsSection summaryType="git-snapshot" summaryId={snap.id} />
+        <CommentsSection
+          summaryType="git-snapshot"
+          summaryId={snap.id}
+          generateParams={{ filter: terms }}
+        />
       </div>
     </div>
   );

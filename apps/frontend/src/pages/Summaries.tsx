@@ -4,8 +4,10 @@ import dayjs from 'dayjs';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useAppStore } from '../store';
 import * as api from '../lib/api';
+import type { SummaryJob } from '../types';
 import { useRepositories, useSummaries } from '../lib/hooks';
 import { renderMarkdown } from '../components/SummaryPanel';
+import { ReportContent } from '../components/ReportContent';
 import { CommentsSection } from '../components/CommentsSection';
 import { ActivityEventsTable } from '../components/ActivityEventsTable';
 import { CommitSnapshotTable } from '../components/CommitSnapshotTable';
@@ -49,6 +51,11 @@ export default function Summaries() {
     queryFn: () => api.listActivitySummaries(100),
     enabled: hasYouTrack,
     refetchOnWindowFocus: false,
+    // Poll while any activity summary is still generating in the background.
+    refetchInterval: (query) =>
+      (query.state.data ?? []).some((s) => s.status === 'pending' || s.status === 'running')
+        ? 2500
+        : false,
   });
   const { data: actSnapshots = [], isLoading: actSnapLoading } = useQuery({
     queryKey: ['activity-snapshots'],
@@ -188,6 +195,7 @@ export default function Summaries() {
               key={item.id ? `${item.type}-${item.id}` : `${item.type}-${idx}`}
               item={item}
               repos={repos}
+              hasYouTrack={hasYouTrack}
               onDelete={() => handleDeleteItem(item)}
             />
           ))}
@@ -198,17 +206,110 @@ export default function Summaries() {
 }
 
 function UnifiedItemCard({
-  item, repos, onDelete,
+  item, repos, hasYouTrack, onDelete,
 }: {
   item: UnifiedItem;
   repos: { id: string; name: string; remote_url: string }[];
+  hasYouTrack: boolean;
   onDelete: () => void;
 }) {
+  const navigate = useNavigate();
   const qc = useQueryClient();
+  const defaultModel = useAppStore((s) => s.settings.defaultModel);
   const [expanded, setExpanded] = useState(false);
   const [editing, setEditing] = useState(false);
   const [editValue, setEditValue] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Inline summarize panel (activity-snapshot & commit-snapshot)
+  const [summarizeOpen, setSummarizeOpen] = useState(false);
+  const [summaryStyle, setSummaryStyle] = useState<'short' | 'detailed' | 'custom'>('detailed');
+  const [customPrompt, setCustomPrompt] = useState('');
+  const [summarizing, setSummarizing] = useState(false);
+  const [summaryPhase, setSummaryPhase] = useState<string | null>(null);
+  const [summaryError, setSummaryError] = useState<string | null>(null);
+  const [savedSummaryId, setSavedSummaryId] = useState<string | null>(null);
+  // git-snapshot reports generate in the background (vs. activity which streams to completion).
+  const [startedInBackground, setStartedInBackground] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
+
+  // Reports generate in the background; surface their live status here.
+  const recordStatus: string | null =
+    item.type === 'git-summary' ? (item.raw as SummaryJob).status
+    : item.type === 'activity-summary' ? ((item.raw as api.ActivitySummaryRecord).status ?? 'completed')
+    : null;
+  const recordError =
+    item.type === 'git-summary' ? (item.raw as SummaryJob).error
+    : item.type === 'activity-summary' ? (item.raw as api.ActivitySummaryRecord).error
+    : null;
+  const jobInFlight = recordStatus === 'pending' || recordStatus === 'running';
+
+  async function handleCancel(e: React.MouseEvent) {
+    e.stopPropagation();
+    try {
+      if (item.type === 'git-summary') await api.cancelSummary(item.id);
+      else if (item.type === 'activity-summary') await api.cancelActivitySummary(item.id);
+    } finally {
+      qc.invalidateQueries({ queryKey: item.type === 'git-summary' ? ['summaries'] : ['activity-summaries'] });
+    }
+  }
+
+  const canSummarize =
+    (hasYouTrack && item.type === 'activity-snapshot') || item.type === 'git-snapshot';
+  // Where the saved report lives once generated.
+  const savedReportPath = savedSummaryId
+    ? item.type === 'activity-snapshot'
+      ? `/reports/activity-summary/${savedSummaryId}`
+      : `/summaries/${savedSummaryId}`
+    : null;
+
+  async function handleSummarize() {
+    abortRef.current?.abort();
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    setSummarizing(true);
+    setSummaryError(null);
+    setSummaryPhase('Generating…');
+    setSavedSummaryId(null);
+
+    const styleInput = {
+      model_name: defaultModel,
+      ...(summaryStyle === 'custom'
+        ? { summary_style: 'custom' as const, custom_prompt: customPrompt }
+        : { summary_style: summaryStyle }),
+    };
+
+    try {
+      if (item.type === 'git-snapshot') {
+        // Returns immediately with a "running" job; it generates in the background.
+        const job = await api.summarizeCommitSnapshot(item.id, styleInput, ctrl.signal);
+        if (!ctrl.signal.aborted) {
+          setSavedSummaryId(job.id);
+          setStartedInBackground(true);
+          qc.invalidateQueries({ queryKey: ['summaries'] });
+          setSummaryPhase(null);
+        }
+      } else {
+        // Returns immediately with a "running" summary; it generates in the background.
+        const summary = await api.summarizeActivitySnapshot(item.id, styleInput);
+        if (!ctrl.signal.aborted) {
+          setSavedSummaryId(summary.id);
+          setStartedInBackground(true);
+          qc.invalidateQueries({ queryKey: ['activity-summaries'] });
+          setSummaryPhase(null);
+        }
+      }
+    } catch (err: unknown) {
+      const isAbort = err instanceof DOMException && err.name === 'AbortError';
+      if (!isAbort) setSummaryError((err as { message?: string })?.message || 'Failed to summarize');
+      setSummaryPhase(null);
+    } finally {
+      if (abortRef.current === ctrl) {
+        setSummarizing(false);
+        abortRef.current = null;
+      }
+    }
+  }
 
   const displayLabel = item.userLabel || item.label;
 
@@ -261,10 +362,115 @@ function UnifiedItemCard({
           </span>
         )}
         <span className="summ-item-meta">{item.meta}</span>
+        {jobInFlight && (
+          <span className="summ-status summ-status-running" title="Generating in the background">
+            <span className="sai-spinner" /> Generating…
+          </span>
+        )}
+        {(recordStatus === 'failed' || recordStatus === 'cancelled') && (
+          <span
+            className={`summ-status summ-status-${recordStatus}`}
+            title={recordError ?? undefined}
+          >
+            {recordStatus === 'cancelled' ? 'Cancelled' : 'Failed'}
+          </span>
+        )}
+        {jobInFlight && (
+          <button className="sai-cancel-btn" onClick={handleCancel} title="Cancel generation">
+            Cancel
+          </button>
+        )}
         <span className="summ-item-time">{dayjs(item.created_at).fromNow()}</span>
+        {canSummarize && (
+          <button
+            className={`summ-ai-btn${summarizeOpen ? ' active' : ''}`}
+            onClick={(e) => { e.stopPropagation(); setSummarizeOpen((v) => !v); setSavedSummaryId(null); setSummaryError(null); }}
+            title="Summarise with AI"
+          >
+            ✦ AI summary
+          </button>
+        )}
         <span className="summ-item-chevron">{expanded ? '▲' : '▼'}</span>
         <button className="report-delete-btn" onClick={(e) => { e.stopPropagation(); onDelete(); }} title="Delete">×</button>
       </header>
+
+      {summarizeOpen && canSummarize && (
+        <div className="sai-panel" onClick={(e) => e.stopPropagation()}>
+          {savedSummaryId ? (
+            <>
+              <div className="sai-success">
+                <span className="sai-success-icon">{startedInBackground ? '⏳' : '✓'}</span>
+                <span className="sai-success-text">
+                  {startedInBackground ? 'Generating in the background — appears in your Reports list' : 'AI report saved'}
+                </span>
+                <button className="sai-open-btn" onClick={() => savedReportPath && navigate(savedReportPath)}>
+                  Open report →
+                </button>
+                <button className="sai-regen-btn" onClick={() => { setSavedSummaryId(null); setStartedInBackground(false); }}>
+                  Re-generate
+                </button>
+              </div>
+              {summaryStyle === 'custom' && customPrompt.trim() && (
+                <p className="yt-summary-custom-prompt" style={{ marginTop: 8 }}>
+                  <em>Prompt:</em> {customPrompt.trim()}
+                </p>
+              )}
+            </>
+          ) : summarizing ? (
+            // Collapsed while generating: just a compact progress line.
+            <div className="sai-row sai-generating">
+              <span className="sai-spinner" />
+              <span className="sai-phase">{summaryPhase ?? 'Generating…'}</span>
+              {summaryStyle === 'custom' && customPrompt.trim() && (
+                <span className="sai-generating-prompt" title={customPrompt}>“{customPrompt.trim()}”</span>
+              )}
+              <button
+                className="sai-cancel-btn"
+                onClick={() => { abortRef.current?.abort(); setSummarizing(false); setSummaryPhase(null); }}
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <>
+              <div className="sai-row">
+                <div className="sai-style-chips">
+                  {(['detailed', 'short', 'custom'] as const).map((s) => (
+                    <button
+                      key={s}
+                      className={`sai-chip${summaryStyle === s ? ' active' : ''}`}
+                      onClick={() => { setSummaryStyle(s); setSavedSummaryId(null); }}
+                    >
+                      {s === 'detailed' ? 'Detailed' : s === 'short' ? 'Short' : 'Custom…'}
+                    </button>
+                  ))}
+                </div>
+                <div className="sai-actions">
+                  <button
+                    className="sai-generate-btn"
+                    onClick={handleSummarize}
+                    disabled={summaryStyle === 'custom' && !customPrompt.trim()}
+                  >
+                    ✦ Generate
+                  </button>
+                </div>
+              </div>
+              {summaryStyle === 'custom' && (
+                <textarea
+                  className="sai-prompt"
+                  placeholder="Describe what you want the AI to focus on…"
+                  rows={2}
+                  value={customPrompt}
+                  onChange={(e) => setCustomPrompt(e.target.value)}
+                  autoFocus
+                />
+              )}
+              {summaryError && <p className="sai-error">{summaryError}</p>}
+            </>
+          )}
+        </div>
+      )}
+
       {expanded && <UnifiedItemBody item={item} repos={repos} />}
     </article>
   );
@@ -290,9 +496,19 @@ function UnifiedItemBody({ item, repos }: {
           <p className="yt-summary-custom-prompt"><em>Prompt:</em> {job.custom_prompt}</p>
         )}
         {job.result ? (
-          <div className="report-content" dangerouslySetInnerHTML={{ __html: renderMarkdown(job.result.summary_markdown, ctx) }} />
+          <ReportContent
+            className="report-content"
+            markdown={job.result.summary_markdown}
+            html={renderMarkdown(job.result.summary_markdown, ctx)}
+            defaultCollapsed
+          />
+        ) : job.status === 'pending' || job.status === 'running' ? (
+          <p className="summ-item-generating"><span className="sai-spinner" /> Generating report in the background…</p>
         ) : (
-          <p className="summ-item-failed">Summary {job.status}.</p>
+          <p className="summ-item-failed">
+            Summary {job.status === 'cancelled' ? 'cancelled' : 'failed'}
+            {job.error ? `: ${job.error}` : '.'}
+          </p>
         )}
         {job.status === 'completed' && <CommentsSection summaryType="git" summaryId={job.id} />}
       </div>
@@ -301,14 +517,38 @@ function UnifiedItemBody({ item, repos }: {
 
   if (item.type === 'activity-summary') {
     const s = item.raw as api.ActivitySummaryRecord;
+    const styleLabel: Record<string, string> = { detailed: 'Detailed', brief: 'Brief', custom: 'Custom' };
     return (
-      <div className="summ-item-body">
+      <div className="sai-panel">
         <div className="summ-item-actions">
           <Link to={`/reports/activity-summary/${s.id}`} className="btn btn-sm">Open full report →</Link>
         </div>
-        {s.custom_prompt && <p className="yt-summary-custom-prompt"><em>Prompt:</em> {s.custom_prompt}</p>}
-        <div className="summary-markdown" dangerouslySetInnerHTML={{ __html: renderMarkdown(s.summary_markdown, null) }} />
-        <CommentsSection summaryType="activity" summaryId={s.id} />
+        <div className="sai-panel-meta">
+          <span className="sai-chip active" style={{ pointerEvents: 'none' }}>
+            {styleLabel[s.summary_style] ?? s.summary_style}
+          </span>
+          {s.custom_prompt && (
+            <span className="yt-summary-custom-prompt" style={{ margin: 0 }}>
+              <em>Prompt:</em> {s.custom_prompt}
+            </span>
+          )}
+        </div>
+        {s.status === 'pending' || s.status === 'running' ? (
+          <p className="summ-item-generating"><span className="sai-spinner" /> Generating report in the background…</p>
+        ) : s.status === 'failed' || s.status === 'cancelled' ? (
+          <p className="summ-item-failed">
+            Summary {s.status === 'cancelled' ? 'cancelled' : 'failed'}
+            {s.error ? `: ${s.error}` : '.'}
+          </p>
+        ) : (
+          <ReportContent
+            className="summary-markdown"
+            markdown={s.summary_markdown}
+            html={renderMarkdown(s.summary_markdown, null)}
+            defaultCollapsed
+          />
+        )}
+        {(s.status ?? 'completed') === 'completed' && <CommentsSection summaryType="activity" summaryId={s.id} />}
       </div>
     );
   }
@@ -342,7 +582,7 @@ function ActivitySnapshotBody({ snapshot, ytBaseUrl }: { snapshot: api.ActivityS
   return (
     <div className="summ-item-body">
       <div className="snap-meta">
-        <span className="snap-meta-pill">{snapshot.source_type === 'board' ? 'Board' : 'Project'}</span>
+        <span className="snap-meta-pill">{snapshot.source_type === 'board' ? 'Board' : snapshot.source_type === 'issue' ? 'Issues' : 'Project'}</span>
         <span className="snap-meta-name">{snapshot.source_name}</span>
         <span className="snap-meta-range">{snapshot.since} → {snapshot.until}</span>
         <span className="snap-meta-count">{snapshot.activity_count} events</span>

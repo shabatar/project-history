@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
+import dayjs from 'dayjs';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../store';
@@ -11,10 +12,12 @@ import {
   useBranches,
   useCommits,
   useAutoParseOnce,
+  COMMIT_BROWSE_LIMIT,
 } from '../lib/hooks';
 import DateRangePicker from '../components/DateRangePicker';
 import CommitTable from '../components/CommitTable';
 import GenerationLog, { createLogEntry, type LogEntry } from '../components/GenerationLog';
+import { MultiTextFilter, matchesTerms } from '../components/MultiTextFilter';
 
 type SummaryMode = 'date-range' | 'branch-diff';
 
@@ -44,6 +47,8 @@ export default function CommitWorkbench() {
   const [branch, setBranch] = useState('');
   const [baseBranch, setBaseBranch] = useState('');
   const [customPrompt, setCustomPrompt] = useState('');
+  const [filterTerms, setFilterTerms] = useState<string[]>([]);
+  const [dateBranch, setDateBranch] = useState('');  // optional branch scope for date-range mode
 
   const [branchDiffCommits, setBranchDiffCommits] = useState<Commit[] | null>(null);
   const [branchDiffLoading, setBranchDiffLoading] = useState(false);
@@ -71,7 +76,7 @@ export default function CommitWorkbench() {
     });
   }, []);
 
-  useEffect(() => { setBranch(''); setBaseBranch(''); }, [selectedRepoId]);
+  useEffect(() => { setBranch(''); setBaseBranch(''); setDateBranch(''); }, [selectedRepoId]);
   useEffect(() => {
     if (selectedRepo && !baseBranch) setBaseBranch(selectedRepo.default_branch || 'main');
   }, [selectedRepo]);
@@ -96,6 +101,7 @@ export default function CommitWorkbench() {
     mode === 'date-range' ? selectedRepoId : null,
     dateRange.from,
     dateRange.to,
+    dateBranch || undefined,
   );
 
   useEffect(() => {
@@ -119,8 +125,30 @@ export default function CommitWorkbench() {
     return () => { cancelled = true; };
   }, [selectedRepoId, branch, baseBranch, mode]);
 
+  // Reset the "Save snapshot" button whenever the previewed commit set changes
+  // (repo, date range, mode, or branch) — a saved snapshot no longer matches.
+  useEffect(() => {
+    setSnapshotSaved(false);
+    setSavedSnapshotPath(null);
+    setSnapshotError(null);
+  }, [selectedRepoId, dateRange.from, dateRange.to, mode, branch, baseBranch, dateBranch, filterTerms]);
+
   const effectiveCommits = mode === 'branch-diff' ? (branchDiffCommits ?? []) : commits;
   const effectiveLoading = mode === 'branch-diff' ? branchDiffLoading : commitsLoading;
+
+  // Multi-term filter (with "-" exclusions) over the previewed commits. The
+  // filtered set is what's shown AND what gets saved as a snapshot.
+  const filteredCommits = useMemo(
+    () => (filterTerms.length === 0
+      ? effectiveCommits
+      : effectiveCommits.filter((c) =>
+          matchesTerms(
+            // Include the date (ISO + display formats) so a date substring filters too.
+            `${c.subject} ${c.author_name} ${c.author_email} ${c.commit_hash} ${c.committed_at ? dayjs(c.committed_at).format('YYYY-MM-DD ddd, MMM D, YYYY HH:mm') : ''}`,
+            filterTerms,
+          ))),
+    [effectiveCommits, filterTerms],
+  );
 
   const repoMap = useMemo(() => {
     const m = new Map<string, Repository>();
@@ -129,20 +157,30 @@ export default function CommitWorkbench() {
   }, [repos]);
 
   async function handleSaveSnapshot() {
-    if (!selectedRepoId || effectiveCommits.length === 0) return;
+    if (!selectedRepoId || filteredCommits.length === 0) return;
     setSnapshotSaving(true);
     setSnapshotSaved(false);
     setSnapshotError(null);
     setSavedSnapshotPath(null);
+    const repoName = selectedRepo?.name ?? selectedRepoId;
+    // When filters are active, build a title that includes them so the saved
+    // snapshot is identifiable in Reports (the user can still rename it).
+    const scope = mode === 'branch-diff'
+      ? `${branch} vs ${baseBranch || 'default'}`
+      : dateBranch || `${dateRange.from}–${dateRange.to}`;
+    const userLabel = filterTerms.length > 0
+      ? `${repoName} · ${scope} · ${filterTerms.join(', ')}`
+      : undefined;
     try {
       const snapshot = await api.saveCommitSnapshot({
         repository_id: selectedRepoId,
-        repo_name: selectedRepo?.name ?? selectedRepoId,
+        repo_name: repoName,
         since: mode === 'date-range' ? dateRange.from : undefined,
         until: mode === 'date-range' ? dateRange.to : undefined,
         branch: mode === 'branch-diff' ? branch : undefined,
         base_branch: mode === 'branch-diff' ? baseBranch || undefined : undefined,
-        commits: effectiveCommits.slice(0, 2000).map((c) => ({
+        user_label: userLabel,
+        commits: filteredCommits.slice(0, COMMIT_BROWSE_LIMIT).map((c) => ({
           commit_hash: c.commit_hash,
           author_name: c.author_name,
           author_email: c.author_email,
@@ -190,11 +228,11 @@ export default function CommitWorkbench() {
 
     try {
       const data = await api.createSummary(body, controller.signal);
-      const elapsed = ((Date.now() - startTimeRef.current) / 1000).toFixed(1);
       if (data.status === 'completed' && data.result) {
-        addLog(`Done · ${data.result.commit_count} commits · ${elapsed}s`, 'success');
+        addLog(`Done · ${data.result.commit_count} commits`, 'success');
       } else {
-        addLog(`Status: ${data.status} · ${elapsed}s`, data.status === 'failed' ? 'error' : 'info');
+        // Report now generates in the background; it shows up (and finishes) in Reports.
+        addLog('Report generation started — track it in Reports. It keeps running if you leave this page.', 'success');
       }
       qc.invalidateQueries({ queryKey: ['summaries'] });
     } catch (err: any) {
@@ -263,7 +301,18 @@ export default function CommitWorkbench() {
 
           {/* Date / branch */}
           {mode === 'date-range' ? (
-            <DateRangePicker value={dateRange} onChange={setDateRange} />
+            <div className="cw-branch-row">
+              <DateRangePicker value={dateRange} onChange={setDateRange} />
+              {branchOptions.length > 0 && (
+                <div className="toolbar-repo">
+                  <span className="toolbar-label">Branch</span>
+                  <select className="input" value={dateBranch} onChange={(e) => setDateBranch(e.target.value)}>
+                    <option value="">All branches</option>
+                    {branchOptions.map((b) => <option key={b} value={b}>{b}</option>)}
+                  </select>
+                </div>
+              )}
+            </div>
           ) : (
             <div className="cw-branch-row">
               <div className="toolbar-repo">
@@ -304,14 +353,36 @@ export default function CommitWorkbench() {
             <>
               <div className="cw-commits-bar">
                 <span className="ce-count">
-                  {effectiveLoading ? 'Loading…' : `${effectiveCommits.length} commit${effectiveCommits.length !== 1 ? 's' : ''}`}
+                  {effectiveLoading
+                    ? 'Loading…'
+                    : filterTerms.length > 0 && filteredCommits.length !== effectiveCommits.length
+                      ? `${filteredCommits.length.toLocaleString()} of ${effectiveCommits.length.toLocaleString()} commits`
+                      : `${effectiveCommits.length.toLocaleString()} commit${effectiveCommits.length !== 1 ? 's' : ''}`}
                 </span>
+                <MultiTextFilter
+                  className="cw-filter"
+                  placeholder="Filter… (Enter to add, -term to exclude)"
+                  chips={filterTerms}
+                  onChange={setFilterTerms}
+                />
+                {!effectiveLoading && effectiveCommits.length >= COMMIT_BROWSE_LIMIT && (
+                  <span
+                    className="cw-capped-note"
+                    title={`Only the first ${COMMIT_BROWSE_LIMIT.toLocaleString()} commits are loaded — narrow the date range to see the rest.`}
+                  >
+                    ⚠ capped at {COMMIT_BROWSE_LIMIT.toLocaleString()} — narrow the range to see more
+                  </span>
+                )}
                 <div className="cw-actions">
                   <button
                     className={`btn btn-sm pf-snapshot-btn${snapshotSaved ? ' pf-snapshot-saved' : ''}`}
                     onClick={snapshotSaved && savedSnapshotPath ? () => navigate(savedSnapshotPath) : handleSaveSnapshot}
-                    disabled={snapshotSaving || (!snapshotSaved && effectiveCommits.length === 0)}
-                    title={snapshotSaved ? 'Click to open saved snapshot' : 'Save to Reports for future reference'}
+                    disabled={snapshotSaving || (!snapshotSaved && filteredCommits.length === 0)}
+                    title={snapshotSaved
+                      ? 'Click to open saved snapshot'
+                      : filterTerms.length > 0
+                        ? 'Save the filtered commits as a snapshot'
+                        : 'Save to Reports for future reference'}
                   >
                     {snapshotSaved ? '✓ Saved · View →' : snapshotSaving ? 'Saving…' : '↓ Save snapshot'}
                   </button>
@@ -319,11 +390,12 @@ export default function CommitWorkbench() {
                 </div>
               </div>
               <CommitTable
-                commits={effectiveCommits}
+                commits={filteredCommits}
                 loading={effectiveLoading}
                 onSelectionCopy={() => {}}
                 showRepoColumn={false}
                 repoMap={repoMap}
+                hideSearch
               />
             </>
           )}

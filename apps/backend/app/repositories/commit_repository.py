@@ -1,8 +1,14 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
 
 from app.models import CommitRecord
+
+
+def _day_start(value: str) -> datetime:
+    """Parse a 'YYYY-MM-DD' (or ISO datetime) string to the start of that day."""
+    return datetime.fromisoformat(value[:10])
+
 
 class CommitRepository:
     def __init__(self, db: Session):
@@ -19,9 +25,9 @@ class CommitRepository:
             CommitRecord.repository_id == repository_id
         )
         if since:
-            q = q.filter(CommitRecord.committed_at >= since)
+            q = q.filter(CommitRecord.committed_at >= _day_start(since))
         if until:
-            q = q.filter(CommitRecord.committed_at <= until)
+            q = q.filter(CommitRecord.committed_at < _day_start(until) + timedelta(days=1))
         return q.order_by(CommitRecord.committed_at.desc()).limit(limit).all()
 
     def list_by_repo_and_range(

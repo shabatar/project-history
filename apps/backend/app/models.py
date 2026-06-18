@@ -64,6 +64,7 @@ class SummaryJob(Base):
     custom_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     user_label: Mapped[str | None] = mapped_column(String(500), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="pending")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
 
     repository: Mapped["Repository"] = relationship(back_populates="summary_jobs")
@@ -84,7 +85,6 @@ class SummaryResult(Base):
 
     summary_job: Mapped["SummaryJob"] = relationship(back_populates="result")
 
-# ── YouTrack Boards ──
 
 class YouTrackConfig(Base):
     """YouTrack server connection. Token is stored encrypted (Fernet) if set via UI; env var always takes precedence."""
@@ -125,17 +125,19 @@ class ActivitySummary(Base):
     __tablename__ = "activity_summaries"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
-    source_type: Mapped[str] = mapped_column(String(16), nullable=False)  # "board" | "project"
-    source_id: Mapped[str] = mapped_column(String(255), nullable=False)   # board DB id or project short name
-    source_name: Mapped[str] = mapped_column(String(500), nullable=False) # human-readable label
-    since: Mapped[str] = mapped_column(String(10), nullable=False)        # YYYY-MM-DD
+    source_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    source_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_name: Mapped[str] = mapped_column(String(500), nullable=False)
+    since: Mapped[str] = mapped_column(String(10), nullable=False)
     until: Mapped[str] = mapped_column(String(10), nullable=False)
     summary_style: Mapped[str] = mapped_column(String(32), nullable=False)
     custom_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     model_name: Mapped[str] = mapped_column(String(255), nullable=False)
     activity_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    summary_markdown: Mapped[str] = mapped_column(Text, nullable=False)
+    summary_markdown: Mapped[str] = mapped_column(Text, nullable=False, default="")
     used_llm: Mapped[bool] = mapped_column(Boolean, default=True)
+    status: Mapped[str] = mapped_column(String(32), default="completed")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
     user_label: Mapped[str | None] = mapped_column(String(500), nullable=True)
     generated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
 
@@ -154,12 +156,12 @@ class SummaryComment(Base):
     __tablename__ = "summary_comments"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
-    summary_type: Mapped[str] = mapped_column(String(16), nullable=False)  # "git" | "activity"
-    summary_id: Mapped[str] = mapped_column(String(32), nullable=False)    # job_id or activity_summary_id
-    comment_type: Mapped[str] = mapped_column(String(16), nullable=False)  # "note" | "request"
+    summary_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    summary_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    comment_type: Mapped[str] = mapped_column(String(16), nullable=False)
     user_content: Mapped[str] = mapped_column(Text, nullable=False)
     ai_response: Mapped[str | None] = mapped_column(Text, nullable=True)
-    ai_status: Mapped[str] = mapped_column(String(16), nullable=False, default="none")  # "none" | "pending" | "done" | "error"
+    ai_status: Mapped[str] = mapped_column(String(16), nullable=False, default="none")
     ai_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     model_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
@@ -171,14 +173,14 @@ class ActivitySnapshot(Base):
     __tablename__ = "activity_snapshots"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
-    source_type: Mapped[str] = mapped_column(String(16), nullable=False)  # "board" | "project"
+    source_type: Mapped[str] = mapped_column(String(16), nullable=False)
     source_id: Mapped[str] = mapped_column(String(255), nullable=False)
     source_name: Mapped[str] = mapped_column(String(500), nullable=False)
     since: Mapped[str] = mapped_column(String(10), nullable=False)
     until: Mapped[str] = mapped_column(String(10), nullable=False)
     activity_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    raw_json: Mapped[str] = mapped_column(Text, nullable=False)  # JSON array of ActivityItem
-    view_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="timeline")  # "timeline" | "by-issue"
+    raw_json: Mapped[str] = mapped_column(Text, nullable=False)
+    view_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="timeline")
     user_label: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
 
@@ -196,7 +198,7 @@ class CommitSnapshot(Base):
     branch: Mapped[str | None] = mapped_column(String(255), nullable=True)
     base_branch: Mapped[str | None] = mapped_column(String(255), nullable=True)
     commit_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    raw_json: Mapped[str] = mapped_column(Text, nullable=False)  # JSON array of commits
+    raw_json: Mapped[str] = mapped_column(Text, nullable=False)
     user_label: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
 
@@ -228,7 +230,7 @@ class YouTrackIssueSnapshot(Base):
     board_id: Mapped[str] = mapped_column(
         String(32), ForeignKey("youtrack_boards.id", ondelete="CASCADE"), nullable=False
     )
-    issue_id: Mapped[str] = mapped_column(String(255), nullable=False)  # e.g. PROJ-123
+    issue_id: Mapped[str] = mapped_column(String(255), nullable=False)
     summary: Mapped[str] = mapped_column(String(1000), default="")
     state: Mapped[str] = mapped_column(String(255), default="")
     assignee: Mapped[str | None] = mapped_column(String(255), nullable=True)

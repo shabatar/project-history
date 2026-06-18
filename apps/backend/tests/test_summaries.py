@@ -91,10 +91,9 @@ def test_create_summary_success(client, db):
     assert data["result"]["commit_count"] == 3
     assert "Authentication" in data["result"]["summary_markdown"]
 
-    # Verify Ollama was called
     mock_gen.assert_called_once()
     prompt = mock_gen.call_args[0][0]
-    assert "summary-test" in prompt  # repo name in prompt
+    assert "summary-test" in prompt
 
 
 def test_create_summary_no_commits(client, db):
@@ -121,7 +120,6 @@ def test_create_summary_no_commits(client, db):
     assert data["result"]["commit_count"] == 0
     assert "No commits" in data["result"]["summary_markdown"]
 
-    # Ollama should NOT be called when there are no commits
     mock_gen.assert_not_called()
 
 
@@ -167,3 +165,72 @@ def test_summary_style_validation(client, db):
         "summary_style": "invalid_style",
     })
     assert resp.status_code == 422
+
+
+def test_cancel_orphaned_summary(client, db):
+    """Cancelling a job with no live task marks it cancelled directly."""
+    from app.repositories.summary_repository import SummaryRepository
+
+    repo = _seed_repo_with_commits(db)
+    job = SummaryRepository(db).create_job(repository_id=repo.id, model_name="llama3.1")
+
+    resp = client.post(f"/summaries/{job.id}/cancel")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "cancelled"
+
+
+def test_cancel_completed_summary_is_noop(client, db):
+    """Cancelling an already-finished job leaves it unchanged."""
+    repo = _seed_repo_with_commits(db)
+    with patch("app.services.ollama_service.generate", new_callable=AsyncMock) as mock_gen:
+        mock_gen.return_value = MOCK_SUMMARY_MD
+        created = client.post("/summaries", json={
+            "repository_id": repo.id,
+            "start_date": "2025-03-01",
+            "end_date": "2025-03-31",
+        }).json()
+    assert created["status"] == "completed"
+
+    resp = client.post(f"/summaries/{created['id']}/cancel")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "completed"
+
+
+def test_reconcile_orphans_fails_stranded_jobs(db):
+    """A job left 'running' by a crash/restart is marked failed on reconcile."""
+    from app.models import Repository
+    from app.repositories.summary_repository import SummaryRepository
+
+    db.add(Repository(
+        id="orphanrepo", name="orphan", remote_url="https://x/y.git",
+        local_path="/tmp/orphan", default_branch="main",
+    ))
+    db.commit()
+
+    sr = SummaryRepository(db)
+    job = sr.create_job(repository_id="orphanrepo", model_name="llama3.1")
+    sr.set_status(job, "running")
+
+    assert sr.reconcile_orphans() == 1
+    db.refresh(job)
+    assert job.status == "failed"
+    assert "interrupted" in (job.error or "").lower()
+
+
+def test_reconcile_orphans_handles_activity_summaries(db):
+    """Activity summaries stranded 'running' are also failed on reconcile."""
+    from app.models import ActivitySummary
+    from app.services import job_manager
+
+    row = ActivitySummary(
+        source_type="board", source_id="b1", source_name="Board",
+        since="2025-03-01", until="2025-03-31", summary_style="detailed",
+        model_name="llama3.1", summary_markdown="", status="running",
+    )
+    db.add(row)
+    db.commit()
+
+    assert job_manager.reconcile_orphans() >= 1
+    db.refresh(row)
+    assert row.status == "failed"
+    assert "interrupted" in (row.error or "").lower()

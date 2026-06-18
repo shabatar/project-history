@@ -1,10 +1,24 @@
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Annotated
 
 import re
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, PlainSerializer, field_validator
 
-# ── Repository ──
+
+def _to_utc_iso(dt: UtcDatetime) -> str:
+    """Serialize datetimes as UTC ISO strings. Naive values are assumed to be UTC.
+
+    SQLite drops tzinfo, so stored timestamps come back naive; without this they
+    serialize without an offset and clients parse them as local time.
+    """
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+UtcDatetime = Annotated[datetime, PlainSerializer(_to_utc_iso, return_type=str)]
+
 
 class RepositoryCreate(BaseModel):
     remote_url: str
@@ -16,8 +30,10 @@ class RepositoryRead(BaseModel):
     id: str
     name: str
     remote_url: str
+    local_path: str
     default_branch: str
-    last_synced_at: datetime | None
+    last_synced_at: UtcDatetime | None
+    last_sync_error: str | None = None
     is_active: bool
     commit_count: int = 0
 
@@ -40,7 +56,6 @@ class RepositoryUpdate(BaseModel):
             _check_branch_name(v)
         return v
 
-# ── Commit ──
 
 class CommitRead(BaseModel):
     id: str
@@ -48,7 +63,7 @@ class CommitRead(BaseModel):
     commit_hash: str
     author_name: str
     author_email: str
-    committed_at: datetime
+    committed_at: UtcDatetime
     subject: str
     body: str
 
@@ -70,7 +85,7 @@ def _check_branch_name(v: str) -> str:
 
 class BranchDiffRequest(BaseModel):
     branch: str
-    base_branch: str | None = None  # defaults to repo's default_branch
+    base_branch: str | None = None
 
     @field_validator("branch", "base_branch")
     @classmethod
@@ -85,17 +100,16 @@ class BranchInfo(BaseModel):
     last_commit_date: str
     is_remote: bool
 
-# ── Summary ──
 
 class SummaryJobCreate(BaseModel):
     repository_id: str
-    start_date: str | None = None  # optional for branch-diff mode
-    end_date: str | None = None    # optional for branch-diff mode
-    branch: str | None = None      # if set, summarize branch diff
-    base_branch: str | None = None # compare against (default: repo default branch)
+    start_date: str | None = None
+    end_date: str | None = None
+    branch: str | None = None
+    base_branch: str | None = None
     model_name: str | None = None
-    summary_style: str | None = None   # "short" | "detailed" | "custom"
-    custom_prompt: str | None = None   # required when summary_style="custom"
+    summary_style: str | None = None
+    custom_prompt: str | None = None
 
     @field_validator("branch", "base_branch")
     @classmethod
@@ -107,15 +121,17 @@ class SummaryJobCreate(BaseModel):
 class SummaryJobRead(BaseModel):
     id: str
     repository_id: str
-    start_date: datetime | None
-    end_date: datetime | None
+    start_date: UtcDatetime | None
+    end_date: UtcDatetime | None
     branch: str | None = None
     base_branch: str | None = None
     model_name: str
     summary_style: str
+    custom_prompt: str | None = None
     status: str
+    error: str | None = None
     user_label: str | None = None
-    created_at: datetime
+    created_at: UtcDatetime
 
     model_config = {"from_attributes": True}
 
@@ -123,19 +139,24 @@ class SummaryJobRead(BaseModel):
 class ItemLabelUpdate(BaseModel):
     user_label: str | None = None
 
+class CommitSnapshotSummarizeRequest(BaseModel):
+    """Summarize a saved commit snapshot into a new git-summary report."""
+    summary_style: str | None = None
+    custom_prompt: str | None = None
+    model_name: str | None = None
+
 class SummaryResultRead(BaseModel):
     id: str
     summary_job_id: str
     summary_markdown: str
     commit_count: int
-    generated_at: datetime
+    generated_at: UtcDatetime
 
     model_config = {"from_attributes": True}
 
 class SummaryJobWithResult(SummaryJobRead):
     result: SummaryResultRead | None = None
 
-# ── Ollama ──
 
 class OllamaModelPullRequest(BaseModel):
     name: str
@@ -160,7 +181,6 @@ class OllamaModel(BaseModel):
     size: int | None = None
     modified_at: str | None = None
 
-# ── YouTrack ──
 
 def _validate_base_url(v: str) -> str:
     v = v.strip().rstrip("/")
@@ -187,7 +207,7 @@ def _validate_token(v: str | None) -> str | None:
 
 class YouTrackConfigCreate(BaseModel):
     base_url: str
-    api_token: str | None = None  # write-only; never returned
+    api_token: str | None = None
 
     @field_validator("base_url")
     @classmethod
@@ -203,7 +223,7 @@ class YouTrackConfigCreate(BaseModel):
 class YouTrackConfigRead(BaseModel):
     id: str
     base_url: str
-    created_at: datetime
+    created_at: UtcDatetime
     token_configured: bool = False
     token_source: str | None = None
 
@@ -231,7 +251,7 @@ class YouTrackTestResponse(BaseModel):
     username: str | None = None
 
 class YouTrackBoardAdd(BaseModel):
-    board_url: str  # e.g. https://youtrack.example.com/agiles/123-45/current
+    board_url: str
 
     @field_validator("board_url")
     @classmethod
@@ -250,7 +270,7 @@ class YouTrackBoardRead(BaseModel):
     board_id: str
     board_name: str
     board_url: str
-    last_synced_at: datetime | None
+    last_synced_at: UtcDatetime | None
 
     model_config = {"from_attributes": True}
 
@@ -261,15 +281,15 @@ class YouTrackIssueRead(BaseModel):
     summary: str
     state: str
     assignee: str | None
-    updated_at: datetime | None
-    synced_at: datetime
+    updated_at: UtcDatetime | None
+    synced_at: UtcDatetime
 
     model_config = {"from_attributes": True}
 
 class IssueChange(BaseModel):
     issue_id: str
     summary: str
-    change_type: str  # "added" | "removed" | "updated"
+    change_type: str
     old_state: str | None = None
     new_state: str | None = None
     old_assignee: str | None = None
@@ -277,7 +297,7 @@ class IssueChange(BaseModel):
 
 class BoardSyncRequest(BaseModel):
     """Optional body for sync endpoints. Without `since`, compares against the latest snapshot."""
-    since: str | None = None  # YYYY-MM-DD — end-of-day UTC is used
+    since: str | None = None
 
     @field_validator("since")
     @classmethod
@@ -299,24 +319,24 @@ class BoardSyncResult(BaseModel):
     board_name: str
     total_issues: int
     changes: list[IssueChange]
-    baseline_synced_at: datetime | None = None
+    baseline_synced_at: UtcDatetime | None = None
     since: str | None = None
 
 class ActivityItem(BaseModel):
-    timestamp: int  # epoch ms
+    timestamp: int
     issue_id: str
     issue_summary: str
-    author: str  # display name, falls back to login
-    author_login: str | None = None  # used to build a /users/<login> link
-    activity_type: str  # "created" | "resolved" | "comment" | "field_change"
-    field: str  # field name for field_change
+    author: str
+    author_login: str | None = None
+    activity_type: str
+    field: str
     old_value: str | None = None
     new_value: str | None = None
     comment_text: str | None = None
 
 class ActivityRequest(BaseModel):
-    since: str  # YYYY-MM-DD
-    until: str  # YYYY-MM-DD
+    since: str
+    until: str
 
 class BoardActivityResponse(BaseModel):
     board_id: str
@@ -327,10 +347,10 @@ class BoardActivityResponse(BaseModel):
 
 
 class ActivitySummaryRequest(BaseModel):
-    since: str  # YYYY-MM-DD
-    until: str  # YYYY-MM-DD
-    summary_style: str | None = None  # "short" | "detailed" | "custom"
-    custom_prompt: str | None = None   # required when summary_style="custom"
+    since: str
+    until: str
+    summary_style: str | None = None
+    custom_prompt: str | None = None
     model_name: str | None = None
 
     @field_validator("summary_style")
@@ -343,8 +363,23 @@ class ActivitySummaryRequest(BaseModel):
         return v
 
 
+class ActivitySnapshotSummarizeRequest(BaseModel):
+    """Summarize a saved activity snapshot. Date range/source come from the snapshot."""
+    summary_style: str | None = None
+    custom_prompt: str | None = None
+    model_name: str | None = None
+
+
+class ActivitySummaryFromEventsRequest(ActivitySummaryRequest):
+    """Summarize already-fetched events, without hitting YouTrack again."""
+    source_type: str
+    source_id: str
+    source_name: str
+    activities: list[ActivityItem]
+
+
 class SummaryCommentCreate(BaseModel):
-    comment_type: str   # "note" | "request"
+    comment_type: str
     user_content: str
 
     @field_validator("comment_type")
@@ -375,22 +410,9 @@ class SummaryCommentRead(BaseModel):
     ai_status: str
     ai_error: str | None
     model_name: str | None
-    created_at: datetime
+    created_at: UtcDatetime
 
     model_config = {"from_attributes": True}
-
-
-class ActivitySummaryResponse(BaseModel):
-    board_id: str
-    board_name: str
-    since: str
-    until: str
-    summary_style: str
-    model_name: str
-    activity_count: int
-    summary_markdown: str
-    used_llm: bool  # False = deterministic fallback because Ollama was unreachable
-    generated_at: datetime
 
 
 class YouTrackProjectRead(BaseModel):
@@ -422,36 +444,24 @@ class ActivitySummaryRead(BaseModel):
     activity_count: int
     summary_markdown: str
     used_llm: bool
+    status: str = "completed"
+    error: str | None = None
     user_label: str | None = None
-    generated_at: datetime
+    generated_at: UtcDatetime
     comment_count: int = 0
 
     model_config = {"from_attributes": True}
 
 
-class ProjectActivitySummaryResponse(BaseModel):
-    project_short_name: str
-    project_name: str
-    since: str
-    until: str
-    summary_style: str
-    model_name: str
-    activity_count: int
-    summary_markdown: str
-    used_llm: bool
-    generated_at: datetime
-
-
-# ── Snapshots ──
 
 class ActivitySnapshotCreate(BaseModel):
-    source_type: str         # "board" | "project"
+    source_type: str
     source_id: str
     source_name: str
-    since: str               # YYYY-MM-DD
+    since: str
     until: str
-    view_mode: str = "timeline"  # "timeline" | "by-issue"
-    activities: list[ActivityItem]  # raw events; capped at 20 000 items
+    view_mode: str = "timeline"
+    activities: list[ActivityItem]
 
     @field_validator("source_type")
     @classmethod
@@ -475,7 +485,7 @@ class ActivitySnapshotRead(BaseModel):
     activity_count: int
     view_mode: str = "timeline"
     user_label: str | None = None
-    created_at: datetime
+    created_at: UtcDatetime
 
     model_config = {"from_attributes": True}
 
@@ -487,7 +497,8 @@ class CommitSnapshotCreate(BaseModel):
     until: str | None = None
     branch: str | None = None
     base_branch: str | None = None
-    commits: list[dict]      # raw commit dicts; capped at 5 000
+    user_label: str | None = None
+    commits: list[dict]
 
     @field_validator("commits")
     @classmethod
@@ -504,12 +515,11 @@ class CommitSnapshotRead(BaseModel):
     base_branch: str | None
     commit_count: int
     user_label: str | None = None
-    created_at: datetime
+    created_at: UtcDatetime
 
     model_config = {"from_attributes": True}
 
 
-# ── Tracked Issues ──
 
 class IssueSearchResult(BaseModel):
     issue_id: str
@@ -535,20 +545,21 @@ class TrackedIssueRead(BaseModel):
     state: str
     assignee: str | None
     project_short_name: str
-    added_at: datetime
-    last_refreshed_at: datetime | None
+    added_at: UtcDatetime
+    last_refreshed_at: UtcDatetime | None
 
     model_config = {"from_attributes": True}
 
 
 class IssueActivityRequest(BaseModel):
     issue_ids: list[str]
-    since: str  # YYYY-MM-DD
-    until: str  # YYYY-MM-DD
+    since: str
+    until: str
 
     @field_validator("issue_ids")
     @classmethod
     def _cap_ids(cls, v: list) -> list:
         return v[:50]
+
 
 

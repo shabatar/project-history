@@ -19,7 +19,7 @@ import logging
 import re
 from collections import defaultdict
 from itertools import islice
-from typing import Sequence
+from typing import Callable, Sequence
 
 import httpx
 from sqlalchemy.orm import Session
@@ -29,13 +29,10 @@ from app.models import CommitRecord, SummaryJob, SummaryResult
 from app.repositories.commit_repository import CommitRepository
 from app.repositories.repo_repository import RepoRepository
 from app.repositories.summary_repository import SummaryRepository
-from app.services import ollama_service
+from app.services import llm_budget, ollama_service
 
 logger = logging.getLogger(__name__)
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 1.  Commit filtering
-# ═══════════════════════════════════════════════════════════════════════════
 
 _NOISE_PATTERNS: list[re.Pattern] = [
     re.compile(r"^Merge (branch|pull request|remote-tracking)", re.IGNORECASE),
@@ -66,16 +63,12 @@ def filter_commits(commits: Sequence[CommitRecord]) -> tuple[list[CommitRecord],
             kept.append(c)
     return kept, filtered
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 2.  Issue / PR reference extraction
-# ═══════════════════════════════════════════════════════════════════════════
 
-# Matches: #123, GH-123, org/repo#45, JIRA-456, PROJECT-789
 _REF_PATTERNS = [
-    re.compile(r"(?:^|[\s(])#(\d+)\b"),                       # #123, (#123)
-    re.compile(r"\bGH-(\d+)\b", re.IGNORECASE),               # GH-123
-    re.compile(r"([\w.\-]+/[\w.\-]+)#(\d+)"),                 # org/repo#45
-    re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b"),                  # JIRA-456, PROJ-123
+    re.compile(r"(?:^|[\s(])#(\d+)\b"),
+    re.compile(r"\bGH-(\d+)\b", re.IGNORECASE),
+    re.compile(r"([\w.\-]+/[\w.\-]+)#(\d+)"),
+    re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b"),
     re.compile(r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)", re.IGNORECASE),
 ]
 
@@ -86,7 +79,7 @@ class IssueRef:
 
     def __init__(self, raw: str):
         self.raw = raw
-        self.commits: list[str] = []  # short hashes
+        self.commits: list[str] = []
 
     def __repr__(self) -> str:
         return f"IssueRef({self.raw}, commits={self.commits})"
@@ -104,9 +97,7 @@ def extract_references(commits: Sequence[CommitRecord]) -> dict[str, IssueRef]:
 
         for pat in _REF_PATTERNS:
             for m in pat.finditer(text):
-                # Normalise: use the full match or the most specific group
                 if m.lastindex and m.lastindex >= 2:
-                    # org/repo#45 pattern
                     raw = f"{m.group(1)}#{m.group(2)}"
                 elif m.lastindex:
                     raw = f"#{m.group(1)}" if m.group(1).isdigit() else m.group(1)
@@ -115,13 +106,11 @@ def extract_references(commits: Sequence[CommitRecord]) -> dict[str, IssueRef]:
                 found.add(raw)
 
         for raw in found:
-            # Normalise GH-N → #N to avoid duplicates
             normalised = re.sub(r"^GH-(\d+)$", r"#\1", raw, flags=re.IGNORECASE)
             if normalised not in refs:
                 refs[normalised] = IssueRef(normalised)
             refs[normalised].commits.append(c.commit_hash[:7])
 
-    # Deduplicate commit lists within each ref
     for ref in refs.values():
         ref.commits = list(dict.fromkeys(ref.commits))
 
@@ -137,11 +126,8 @@ def _format_references_block(refs: dict[str, IssueRef]) -> str:
         lines.append(f"  {raw}  (commits: {commits_str})")
     return "\n".join(lines)
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 3.  Day grouping
-# ═══════════════════════════════════════════════════════════════════════════
 
-DayGroup = tuple[str, list[CommitRecord]]  # ("2025-03-18", [commits…])
+DayGroup = tuple[str, list[CommitRecord]]
 
 def group_by_day(commits: list[CommitRecord]) -> list[DayGroup]:
     """Return commits grouped by date, oldest day first, commits within a day
@@ -152,14 +138,11 @@ def group_by_day(commits: list[CommitRecord]) -> list[DayGroup]:
         by_day[day].append(c)
     return sorted(by_day.items())
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 4.  Token-aware chunking
-# ═══════════════════════════════════════════════════════════════════════════
 
-_CHARS_PER_TOKEN = 4
+_CHARS_PER_TOKEN = llm_budget.CHARS_PER_TOKEN
 
 def _estimate_tokens(text: str) -> int:
-    return max(1, len(text) // _CHARS_PER_TOKEN)
+    return llm_budget.estimate_tokens(text)
 
 def _format_commit_line(c: CommitRecord) -> str:
     body_preview = c.body.strip().replace("\n", " ")[:120] if c.body else ""
@@ -207,9 +190,6 @@ def chunk_by_token_budget(
 
     return chunks
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 5.  Prompt templates — three styles
-# ═══════════════════════════════════════════════════════════════════════════
 
 _SYSTEM_PREAMBLE = """\
 You are a software-engineering progress analyst.  You are summarising git \
@@ -234,7 +214,6 @@ GLOBAL RULES (apply to every style):
 - Output valid Markdown.
 """
 
-# ── Shared issue-progress section injected into every style ──
 
 _ISSUE_PROGRESS_SECTION = """
 ## Issue Progress
@@ -252,7 +231,6 @@ description of what each does.  Prioritise commits that fix bugs, add features, 
 or introduce risk over routine changes. -->
 """
 
-# ── Short ──
 
 _SHORT_INSTRUCTIONS = """
 Produce a **concise** summary (aim for 200-400 words).  Use this structure:
@@ -265,7 +243,6 @@ refs [abc1234] and issue refs #123 inline. -->
 <!-- Anything that needs attention — write "None" if nothing stands out -->
 """
 
-# ── Detailed (engineering) ──
 
 _DETAILED_INSTRUCTIONS = """
 Produce a **thorough engineering summary**.  Use EXACTLY these section \
@@ -297,7 +274,6 @@ refs [abc1234] and issue refs #123 inline with each item. -->
 <!-- A concise 3-5 bullet summary suitable for a stand-up or status email -->
 """
 
-# ── Manager-friendly ──
 
 _MANAGER_INSTRUCTIONS = """
 Produce a **manager-friendly progress update** — non-technical language, \
@@ -346,7 +322,6 @@ def _get_style_instructions(
         commit_refs_section=commit_section,
     )
 
-# ── Merge prompt ──
 
 _MERGE_PROMPT = """\
 You are a software-engineering progress analyst.  Below are partial summaries \
@@ -368,6 +343,63 @@ RULES:
 PARTIAL SUMMARIES:
 {partials}
 """
+
+def _batch_by_token_budget(items: list[str], token_budget: int) -> list[list[str]]:
+    """Group consecutive items so each batch stays within *token_budget*."""
+    batches: list[list[str]] = []
+    current: list[str] = []
+    current_tokens = 0
+    for item in items:
+        t = _estimate_tokens(item)
+        if current and current_tokens + t > token_budget:
+            batches.append(current)
+            current, current_tokens = [], 0
+        current.append(item)
+        current_tokens += t
+    if current:
+        batches.append(current)
+    return batches
+
+
+async def _merge_one_batch(
+    batch: list[str], repo_name: str, start_label: str, end_label: str, model: str,
+) -> str:
+    if len(batch) == 1:
+        return batch[0]
+    numbered = "\n\n".join(f"### Partial {i}\n{text}" for i, text in enumerate(batch, 1))
+    merge_prompt = _MERGE_PROMPT.format(
+        repo_name=repo_name, start_date=start_label, end_date=end_label, partials=numbered,
+    )
+    return await ollama_service.generate(merge_prompt, model=model)
+
+
+async def _merge_partials(
+    partials: list[str],
+    *,
+    repo_name: str,
+    start_label: str,
+    end_label: str,
+    model: str,
+    token_budget: int,
+) -> str:
+    """Merge per-chunk summaries into one.
+
+    With many chunks the concatenated partials can themselves overflow the model's
+    context, so merge hierarchically: reduce in budget-sized batches until a single
+    summary remains (a map-reduce over the partial summaries).
+    """
+    if not partials:
+        return ""
+    while len(partials) > 1:
+        batches = _batch_by_token_budget(partials, token_budget)
+        if len(batches) == len(partials):
+            batches = [partials]
+        partials = [
+            await _merge_one_batch(b, repo_name, start_label, end_label, model)
+            for b in batches
+        ]
+    return partials[0]
+
 
 def _build_chunk_prompt(
     *,
@@ -399,9 +431,6 @@ def _build_chunk_prompt(
         parts.append(f"\n{refs_block}")
     return "\n".join(parts)
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 6.  Local fallback when Ollama is unreachable
-# ═══════════════════════════════════════════════════════════════════════════
 
 def _build_fallback_summary(
     repo_name: str,
@@ -425,7 +454,6 @@ def _build_fallback_summary(
         f"**Active days:** {len(day_groups)}  ",
     ]
 
-    # Issue progress (deterministic)
     lines += ["", "## Issue Progress"]
     if refs:
         for raw, ref in sorted(refs.items()):
@@ -451,124 +479,74 @@ def _build_fallback_summary(
     ]
     return "\n".join(lines)
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 7.  Public entry point
-# ═══════════════════════════════════════════════════════════════════════════
 
-async def create_and_run_summary(
+ChunkPromptBuilder = Callable[[int, int, list[DayGroup], dict[str, IssueRef], str, str], str]
+
+
+async def _run_commit_summary(
+    *,
     job: SummaryJob,
-    db: Session,
+    summary_repo: SummaryRepository,
+    raw_commits: list[CommitRecord],
+    repo_name: str,
+    empty_message: str,
+    noise_message: str,
+    build_chunk_prompt: ChunkPromptBuilder,
+    start_label: str | None = None,
+    end_label: str | None = None,
 ) -> SummaryResult:
-    repo_repo = RepoRepository(db)
-    commit_repo = CommitRepository(db)
-    summary_repo = SummaryRepository(db)
+    """Shared pipeline for every commit summary: filter → group → model-aware
+    chunk + generate → hierarchical merge → persist, with a deterministic local
+    fallback when Ollama is unreachable.
 
-    repo = repo_repo.get_by_id(job.repository_id)
-    if repo is None:
-        raise ValueError(f"Repository {job.repository_id} not found")
-
+    The only things that vary between date-range, branch-diff, and snapshot
+    summaries are how commits are sourced (done by the caller), the per-chunk
+    prompt (``build_chunk_prompt``), and the empty/noise messages.
+    ``start_label``/``end_label`` default to the first/last active day.
+    """
     summary_repo.set_status(job, "running")
 
-    # ── Fetch & filter ──
-    raw_commits = commit_repo.list_by_repo_and_range(
-        job.repository_id, job.start_date, job.end_date
-    )
     if not raw_commits:
-        return summary_repo.add_result(
-            job,
-            summary_markdown="_No commits found in the selected date range._",
-            commit_count=0,
-        )
+        return summary_repo.add_result(job, summary_markdown=empty_message, commit_count=0)
 
     commits, filtered_count = filter_commits(raw_commits)
     if not commits:
-        return summary_repo.add_result(
-            job,
-            summary_markdown=(
-                f"_All {len(raw_commits)} commits in this range were filtered "
-                f"as noise (merge-only, trivial typo/formatting, bot commits)._"
-            ),
-            commit_count=0,
-        )
+        return summary_repo.add_result(job, summary_markdown=noise_message, commit_count=0)
 
-    logger.info(
-        "Commits: %d total, %d kept, %d filtered for %s",
-        len(raw_commits), len(commits), filtered_count, repo.name,
-    )
-
-    # ── Extract issue/PR references ──
     refs = extract_references(commits)
-    if refs:
-        logger.info(
-            "Found %d issue/PR references: %s",
-            len(refs), ", ".join(sorted(refs.keys())),
-        )
-
-    # ── Group by day (deterministic order) ──
     day_groups = group_by_day(commits)
+    start = start_label or day_groups[0][0]
+    end = end_label or day_groups[-1][0]
 
-    start_str = f"{job.start_date:%Y-%m-%d}"
-    end_str = f"{job.end_date:%Y-%m-%d}"
-    style = job.summary_style or "detailed"
-    custom_prompt = getattr(job, "custom_prompt", None)
-
-    # ── Token-aware chunking ──
-    chunks = chunk_by_token_budget(day_groups, settings.summary_token_budget)
+    token_budget = await llm_budget.resolve_token_budget(
+        job.model_name, floor=settings.summary_token_budget,
+    )
+    chunks = chunk_by_token_budget(day_groups, token_budget)
     total_chunks = len(chunks)
 
     logger.info(
-        "Summarising %d commits for %s in %d chunk(s), style=%s, model=%s",
-        len(commits), repo.name, total_chunks, style, job.model_name,
+        "Summarising %d commits for %s in %d chunk(s) (budget=%d tok, %d filtered), style=%s, model=%s",
+        len(commits), repo_name, total_chunks, token_budget, filtered_count,
+        job.summary_style or "detailed", job.model_name,
     )
 
-    # ── Generate via LLM (with fallback) ──
     try:
-        partial_summaries: list[str] = []
+        partials: list[str] = []
         for idx, chunk_groups in enumerate(chunks, 1):
-            # Collect refs for commits in this chunk only
-            chunk_commits = [c for _, cs in chunk_groups for c in cs]
-            chunk_refs = extract_references(chunk_commits)
-
-            prompt = _build_chunk_prompt(
-                repo_name=repo.name,
-                start_date=start_str,
-                end_date=end_str,
-                chunk_index=idx,
-                total_chunks=total_chunks,
-                style=style,
-                day_groups=chunk_groups,
-                refs=chunk_refs,
-                custom_prompt=custom_prompt,
-            )
+            chunk_refs = extract_references([c for _, cs in chunk_groups for c in cs])
+            prompt = build_chunk_prompt(idx, total_chunks, chunk_groups, chunk_refs, start, end)
             partial = await ollama_service.generate(prompt, model=job.model_name)
-            partial_summaries.append(partial)
+            partials.append(partial)
             logger.info("Chunk %d/%d done (%d chars)", idx, total_chunks, len(partial))
 
-        # ── Merge pass ──
-        if total_chunks == 1:
-            summary_md = partial_summaries[0]
-        else:
-            numbered = "\n\n".join(
-                f"### Partial {i}\n{text}"
-                for i, text in enumerate(partial_summaries, 1)
-            )
-            merge_prompt = _MERGE_PROMPT.format(
-                repo_name=repo.name,
-                start_date=start_str,
-                end_date=end_str,
-                partials=numbered,
-            )
-            summary_md = await ollama_service.generate(merge_prompt, model=job.model_name)
-            logger.info("Merge pass done (%d chars)", len(summary_md))
-
+        summary_md = await _merge_partials(
+            partials,
+            repo_name=repo_name, start_label=start, end_label=end,
+            model=job.model_name, token_budget=token_budget,
+        )
     except (httpx.ConnectError, httpx.ConnectTimeout, OSError) as exc:
-        logger.warning(
-            "Ollama unreachable (%s) — falling back to local summary for job %s",
-            exc, job.id,
-        )
-        summary_md = _build_fallback_summary(
-            repo.name, start_str, end_str, day_groups, filtered_count, refs
-        )
+        logger.warning("Ollama unreachable (%s) — local fallback for job %s", exc, job.id)
+        summary_md = _build_fallback_summary(repo_name, start, end, day_groups, filtered_count, refs)
     except Exception as exc:
         logger.error("Summary generation failed for job %s: %s", job.id, exc)
         summary_repo.set_status(job, "failed")
@@ -578,9 +556,38 @@ async def create_and_run_summary(
     logger.info("Summary persisted for job %s (%d commits)", job.id, len(commits))
     return result
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 8.  Branch-diff summary (no time bounds)
-# ═══════════════════════════════════════════════════════════════════════════
+
+async def create_and_run_summary(job: SummaryJob, db: Session) -> SummaryResult:
+    """Summarise commits in the job's date range (queried from the DB)."""
+    repo = RepoRepository(db).get_by_id(job.repository_id)
+    if repo is None:
+        raise ValueError(f"Repository {job.repository_id} not found")
+
+    raw_commits = CommitRepository(db).list_by_repo_and_range(
+        job.repository_id, job.start_date, job.end_date
+    )
+    style = job.summary_style or "detailed"
+    custom_prompt = getattr(job, "custom_prompt", None)
+
+    def build(idx, total, day_groups, refs, start, end):
+        return _build_chunk_prompt(
+            repo_name=repo.name, start_date=start, end_date=end,
+            chunk_index=idx, total_chunks=total, style=style,
+            day_groups=day_groups, refs=refs, custom_prompt=custom_prompt,
+        )
+
+    return await _run_commit_summary(
+        job=job, summary_repo=SummaryRepository(db), raw_commits=raw_commits,
+        repo_name=repo.name,
+        start_label=f"{job.start_date:%Y-%m-%d}", end_label=f"{job.end_date:%Y-%m-%d}",
+        empty_message="_No commits found in the selected date range._",
+        noise_message=(
+            f"_All {len(raw_commits)} commits in this range were filtered "
+            f"as noise (merge-only, trivial typo/formatting, bot commits)._"
+        ),
+        build_chunk_prompt=build,
+    )
+
 
 _BRANCH_PREAMBLE = """\
 You are a software-engineering progress analyst.  You are summarising the \
@@ -638,98 +645,62 @@ async def create_and_run_branch_summary(
     db: Session,
 ) -> SummaryResult:
     """Summarise commits from a branch diff (no date bounds)."""
-    repo_repo = RepoRepository(db)
-    summary_repo = SummaryRepository(db)
-
-    repo = repo_repo.get_by_id(job.repository_id)
+    repo = RepoRepository(db).get_by_id(job.repository_id)
     if repo is None:
         raise ValueError(f"Repository {job.repository_id} not found")
 
-    summary_repo.set_status(job, "running")
-
     branch = job.branch or "unknown"
     base_branch = job.base_branch or repo.default_branch or "main"
-
-    if not branch_commits:
-        return summary_repo.add_result(
-            job,
-            summary_markdown=f"_No commits found on `{branch}` that are not already in `{base_branch}`._",
-            commit_count=0,
-        )
-
-    commits, filtered_count = filter_commits(branch_commits)
-    if not commits:
-        return summary_repo.add_result(
-            job,
-            summary_markdown=f"_All {len(branch_commits)} commits on `{branch}` were filtered as noise._",
-            commit_count=0,
-        )
-
-    logger.info(
-        "Branch diff %s..%s: %d total, %d kept, %d filtered for %s",
-        base_branch, branch, len(branch_commits), len(commits), filtered_count, repo.name,
-    )
-
-    refs = extract_references(commits)
-    day_groups = group_by_day(commits)
     style = job.summary_style or "detailed"
     custom_prompt = getattr(job, "custom_prompt", None)
 
-    chunks = chunk_by_token_budget(day_groups, settings.summary_token_budget)
-    total_chunks = len(chunks)
+    def build(idx, total, day_groups, refs, _start, _end):
+        return _build_branch_chunk_prompt(
+            repo_name=repo.name, branch=branch, base_branch=base_branch,
+            chunk_index=idx, total_chunks=total, style=style,
+            day_groups=day_groups, refs=refs, custom_prompt=custom_prompt,
+        )
 
-    logger.info(
-        "Summarising branch %s vs %s: %d commits in %d chunk(s), style=%s",
-        branch, base_branch, len(commits), total_chunks, style,
+    return await _run_commit_summary(
+        job=job, summary_repo=SummaryRepository(db), raw_commits=branch_commits,
+        repo_name=repo.name,
+        start_label=f"branch {branch}", end_label=f"vs {base_branch}",
+        empty_message=f"_No commits found on `{branch}` that are not already in `{base_branch}`._",
+        noise_message=f"_All {len(branch_commits)} commits on `{branch}` were filtered as noise._",
+        build_chunk_prompt=build,
     )
 
-    try:
-        partial_summaries: list[str] = []
-        for idx, chunk_groups in enumerate(chunks, 1):
-            chunk_commits_flat = [c for _, cs in chunk_groups for c in cs]
-            chunk_refs = extract_references(chunk_commits_flat)
 
-            prompt = _build_branch_chunk_prompt(
-                repo_name=repo.name,
-                branch=branch,
-                base_branch=base_branch,
-                chunk_index=idx,
-                total_chunks=total_chunks,
-                style=style,
-                day_groups=chunk_groups,
-                refs=chunk_refs,
-                custom_prompt=custom_prompt,
-            )
-            partial = await ollama_service.generate(prompt, model=job.model_name)
-            partial_summaries.append(partial)
-            logger.info("Branch chunk %d/%d done (%d chars)", idx, total_chunks, len(partial))
+async def create_and_run_snapshot_summary(
+    job: SummaryJob,
+    snapshot_commits: list[CommitRecord],
+    repo_name: str,
+    db: Session,
+) -> SummaryResult:
+    """Summarise commits captured in a saved commit snapshot.
 
-        if total_chunks == 1:
-            summary_md = partial_summaries[0]
-        else:
-            numbered = "\n\n".join(
-                f"### Partial {i}\n{text}"
-                for i, text in enumerate(partial_summaries, 1)
-            )
-            merge_prompt = _MERGE_PROMPT.format(
-                repo_name=repo.name,
-                start_date=f"branch {branch}",
-                end_date=f"vs {base_branch}",
-                partials=numbered,
-            )
-            summary_md = await ollama_service.generate(merge_prompt, model=job.model_name)
+    Commits are provided directly (from the snapshot's stored payload) instead of
+    queried from the DB, so this works even for snapshots with no date range/branch
+    or whose repository is no longer tracked. Date labels are derived from the
+    commits themselves.
+    """
+    style = job.summary_style or "detailed"
+    custom_prompt = getattr(job, "custom_prompt", None)
 
-    except (httpx.ConnectError, httpx.ConnectTimeout, OSError) as exc:
-        logger.warning("Ollama unreachable for branch summary: %s", exc)
-        summary_md = _build_fallback_summary(
-            repo.name, f"branch:{branch}", f"base:{base_branch}",
-            day_groups, filtered_count, refs
+    def build(idx, total, day_groups, refs, start, end):
+        return _build_chunk_prompt(
+            repo_name=repo_name, start_date=start, end_date=end,
+            chunk_index=idx, total_chunks=total, style=style,
+            day_groups=day_groups, refs=refs, custom_prompt=custom_prompt,
         )
-    except Exception as exc:
-        logger.error("Branch summary failed for job %s: %s", job.id, exc)
-        summary_repo.set_status(job, "failed")
-        raise
 
-    result = summary_repo.add_result(job, summary_md, len(commits))
-    logger.info("Branch summary persisted for job %s (%d commits)", job.id, len(commits))
-    return result
+    return await _run_commit_summary(
+        job=job, summary_repo=SummaryRepository(db), raw_commits=snapshot_commits,
+        repo_name=repo_name,
+        empty_message="_This snapshot contains no commits._",
+        noise_message=(
+            f"_All {len(snapshot_commits)} commits in this snapshot were filtered "
+            f"as noise (merge-only, trivial typo/formatting, bot commits)._"
+        ),
+        build_chunk_prompt=build,
+    )

@@ -39,7 +39,7 @@ export function configureIssueTracker(type: IssueTrackerType, url: string) {
   _trackerBaseUrl = url.replace(/\/+$/, '');
 }
 
-function issueTrackerUrl(project: string, number: string): string | null {
+export function issueTrackerUrl(project: string, number: string): string | null {
   if (_trackerType === 'none' || !_trackerBaseUrl) return null;
 
   switch (_trackerType) {
@@ -163,6 +163,19 @@ function commitUrl(host: HostInfo, hash: string): string | null {
     default:
       return `${host.baseUrl}/commit/${hash}`;
   }
+}
+
+/**
+ * Build a web URL to a commit on its hosting provider, or null when the repo
+ * isn't a recognised remote (e.g. a `local://` repo added from disk) — in which
+ * case the commit hash should render as plain, non-clickable text.
+ */
+export function commitLink(remoteUrl: string | null | undefined, hash: string): string | null {
+  if (!remoteUrl || !hash) return null;
+  if (remoteUrl.startsWith('local://')) return null;
+  const host = parseHostInfo(remoteUrl);
+  if (host.type === 'unknown' || !host.org || !host.repo) return null;
+  return commitUrl(host, hash);
 }
 
 function issueOrPrUrl(host: HostInfo, num: string): string | null {

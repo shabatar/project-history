@@ -2,7 +2,12 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import dayjs from 'dayjs';
 import type { SummaryJob, Repository } from '../types';
+import { marked } from 'marked';
 import { linkifyReferences, type RepoContext } from '../lib/linkify';
+
+// GitHub-flavored markdown; single newlines become <br> to match how comments
+// and YouTrack field values are typically written. Output is sanitized below.
+marked.setOptions({ gfm: true, breaks: true });
 
 interface Props {
   jobs: SummaryJob[];
@@ -178,145 +183,36 @@ export function renderMarkdown(
 }
 
 /**
- * Converts markdown to HTML with support for headings, bold, italic,
- * inline code, bullet lists, numbered lists, tables, horizontal rules,
- * and paragraphs.
+ * Converts markdown to HTML using `marked` (GFM): headings, bold/italic, inline
+ * and fenced code, blockquotes, ordered/unordered + nested lists, tables,
+ * horizontal rules, autolinks, and links. Output is sanitized by sanitizeHtml.
  */
 function markdownToHtml(md: string): string {
-  // Escape HTML
-  md = md.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-
-  const lines = md.split('\n');
-  const out: string[] = [];
-  let inList: 'ul' | 'ol' | null = null;
-  let inTable = false;
-  let tableHeaderDone = false;
-
-  for (let i = 0; i < lines.length; i++) {
-    let line = lines[i];
-
-    // Horizontal rule
-    if (/^[-*_]{3,}\s*$/.test(line)) {
-      closeList(); closeTable();
-      out.push('<hr/>');
-      continue;
-    }
-
-    // Headings
-    const headingMatch = line.match(/^(#{1,4})\s+(.+)$/);
-    if (headingMatch) {
-      closeList(); closeTable();
-      const level = headingMatch[1].length;
-      const text = inlineFormat(headingMatch[2]);
-      out.push(`<h${level + 1}>${text}</h${level + 1}>`);
-      continue;
-    }
-
-    // Table row
-    if (line.includes('|') && line.trim().startsWith('|')) {
-      const cells = line.split('|').filter((c) => c.trim() !== '');
-      if (cells.length > 0) {
-        // Check if this is a separator row (| --- | --- |)
-        if (cells.every((c) => /^[\s:-]+$/.test(c))) {
-          tableHeaderDone = true;
-          continue;
-        }
-        if (!inTable) {
-          closeList();
-          inTable = true;
-          tableHeaderDone = false;
-          out.push('<div class="report-table-wrap"><table class="report-table">');
-        }
-        const tag = !tableHeaderDone ? 'th' : 'td';
-        const rowHtml = cells
-          .map((c) => `<${tag}>${inlineFormat(c.trim())}</${tag}>`)
-          .join('');
-        if (!tableHeaderDone) {
-          out.push(`<thead><tr>${rowHtml}</tr></thead><tbody>`);
-          tableHeaderDone = true;
-        } else {
-          out.push(`<tr>${rowHtml}</tr>`);
-        }
-        continue;
-      }
-    } else if (inTable) {
-      closeTable();
-    }
-
-    // Unordered list
-    if (/^[\s]*[-*+]\s+/.test(line)) {
-      if (inList !== 'ul') { closeList(); inList = 'ul'; out.push('<ul>'); }
-      const indent = line.match(/^(\s*)/)?.[1].length ?? 0;
-      const text = inlineFormat(line.replace(/^[\s]*[-*+]\s+/, ''));
-      const cls = indent >= 4 ? ' class="nested"' : '';
-      out.push(`<li${cls}>${text}</li>`);
-      continue;
-    }
-
-    // Ordered list
-    if (/^[\s]*\d+\.\s+/.test(line)) {
-      if (inList !== 'ol') { closeList(); inList = 'ol'; out.push('<ol>'); }
-      const text = inlineFormat(line.replace(/^[\s]*\d+\.\s+/, ''));
-      out.push(`<li>${text}</li>`);
-      continue;
-    }
-
-    // Close open list if non-list line
-    if (inList && line.trim() !== '') {
-      closeList();
-    }
-
-    // Empty line
-    if (line.trim() === '') {
-      continue;
-    }
-
-    // Paragraph
-    out.push(`<p>${inlineFormat(line)}</p>`);
-  }
-
-  closeList();
-  closeTable();
-  return out.join('\n');
-
-  function closeList() {
-    if (inList === 'ul') out.push('</ul>');
-    else if (inList === 'ol') out.push('</ol>');
-    inList = null;
-  }
-
-  function closeTable() {
-    if (inTable) {
-      out.push('</tbody></table></div>');
-      inTable = false;
-      tableHeaderDone = false;
-    }
-  }
+  // marked.parse is synchronous here (no async extensions configured).
+  return marked.parse(md) as string;
 }
 
 import DOMPurify from 'dompurify';
 
 const purifyConfig = {
   ALLOWED_TAGS: [
-    'a', 'strong', 'em', 'code', 'del', 'p',
-    'h2', 'h3', 'h4', 'h5',
-    'ul', 'ol', 'li', 'hr',
+    'a', 'strong', 'em', 'code', 'del', 'p', 'br',
+    'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+    'ul', 'ol', 'li', 'hr', 'blockquote',
     'table', 'thead', 'tbody', 'tr', 'th', 'td',
-    'div', 'pre',
+    'div', 'pre', 'span',
   ],
   ALLOWED_ATTR: ['href', 'target', 'rel', 'class', 'title'],
 };
 
+// Open all rendered links in a new tab (marked emits bare <a href>).
+DOMPurify.addHook('afterSanitizeAttributes', (node) => {
+  if (node.tagName === 'A' && node.getAttribute('href')) {
+    node.setAttribute('target', '_blank');
+    node.setAttribute('rel', 'noopener noreferrer');
+  }
+});
+
 function sanitizeHtml(html: string): string {
   return DOMPurify.sanitize(html, purifyConfig);
-}
-
-/** Inline formatting: bold, italic, code, strikethrough */
-function inlineFormat(text: string): string {
-  return text
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*(.+?)\*/g, '<em>$1</em>')
-    .replace(/_(.+?)_/g, '<em>$1</em>')
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/~~(.+?)~~/g, '<del>$1</del>');
 }

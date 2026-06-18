@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import dayjs from 'dayjs';
 import * as api from '../lib/api';
 import { renderMarkdown } from '../components/SummaryPanel';
+import { ReportContent } from '../components/ReportContent';
 import { CommentsSection } from '../components/CommentsSection';
 import { EditableTitle } from '../components/EditableTitle';
 
@@ -20,6 +21,9 @@ export default function ActivitySummaryDetail() {
     queryKey: ['activity-summary', summaryId],
     queryFn: () => api.getActivitySummary(summaryId!),
     enabled: !!summaryId,
+    // Poll while the summary is still generating in the background.
+    refetchInterval: (query) =>
+      query.state.data?.status === 'pending' || query.state.data?.status === 'running' ? 2500 : false,
   });
 
   if (isLoading) return <div className="page"><div className="empty-state">Loading…</div></div>;
@@ -62,13 +66,33 @@ export default function ActivitySummaryDetail() {
         </p>
       )}
 
-      <div className="report-content summ-detail-content"
-        dangerouslySetInnerHTML={{ __html: renderMarkdown(summary.summary_markdown, null) }}
-      />
+      {summary.status === 'pending' || summary.status === 'running' ? (
+        <div className="report-generating">
+          <span className="sai-spinner" /> Generating report in the background… this page updates automatically.
+          <button className="sai-cancel-btn" style={{ marginLeft: 12 }} onClick={async () => {
+            await api.cancelActivitySummary(summary.id);
+            qc.invalidateQueries({ queryKey: ['activity-summary', summaryId] });
+          }}>
+            Cancel
+          </button>
+        </div>
+      ) : summary.status === 'failed' || summary.status === 'cancelled' ? (
+        <div className="report-error">
+          {summary.error || (summary.status === 'cancelled' ? 'Summary generation was cancelled.' : 'Summary generation failed.')}
+        </div>
+      ) : (
+        <ReportContent
+          className="report-content summ-detail-content"
+          markdown={summary.summary_markdown}
+          html={renderMarkdown(summary.summary_markdown, null)}
+        />
+      )}
 
-      <div className="snap-detail-comments">
-        <CommentsSection summaryType="activity" summaryId={summary.id} />
-      </div>
+      {(summary.status ?? 'completed') === 'completed' && (
+        <div className="snap-detail-comments">
+          <CommentsSection summaryType="activity" summaryId={summary.id} />
+        </div>
+      )}
     </div>
   );
 }

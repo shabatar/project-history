@@ -2,7 +2,7 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings
 
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent  # apps/backend
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 class Settings(BaseSettings):
     app_name: str = "Project History"
@@ -10,26 +10,27 @@ class Settings(BaseSettings):
     repos_dir: Path = _PROJECT_ROOT / "repos"
     database_url: str = ""
 
-    # Ollama
     ollama_base_url: str = "http://localhost:11434"
-    ollama_client_mode: str = "native"  # "native" | "openai"
+    ollama_client_mode: str = "native"
     default_model: str = "llama3.1"
 
-    # Summarisation tuning
-    summary_chunk_size: int = 80  # max commits per LLM call (fallback)
-    summary_token_budget: int = 3200  # approx token budget per chunk prompt
+    summary_chunk_size: int = 80
+    summary_token_budget: int = 3200
     summary_temperature: float = 0.3
 
-    # Git SSH
-    ssh_key_path: str = ""  # e.g. ~/.ssh/id_rsa — empty = system default
+    ssh_key_path: str = ""
 
-    # YouTrack integration (optional)
+    git_timeout: int = 300
+    git_network_timeout: int = 3600
+
     youtrack_enabled: bool = False
-    youtrack_base_url: str = ""    # e.g. https://youtrack.example.com
-    youtrack_api_token: str = ""   # set via env var, never stored in DB
+    youtrack_base_url: str = ""
+    youtrack_api_token: str = ""
 
-    # API access control (optional — if set, all endpoints require this key)
-    api_key: str = ""  # set PT_API_KEY to require authentication
+    api_key: str = ""
+
+    rate_limit: int = 600
+    rate_limit_window: int = 60
 
     log_level: str = "INFO"
 

@@ -2,8 +2,12 @@
 
 import { useMemo } from 'react';
 import dayjs from 'dayjs';
+import { Link } from 'react-router-dom';
 import type { ActivityItem } from '../../lib/api';
 import { renderMarkdown } from '../../components/SummaryPanel';
+import { MarkdownText, isRichText } from '../../components/MarkdownText';
+import { CopyButton } from '../../components/CopyButton';
+import { issueActivityToText } from '../../lib/activityText';
 import { CommentsSection } from '../../components/CommentsSection';
 import { userUrl, issueUrl } from '../../lib/youtrackLinks';
 import {
@@ -18,7 +22,7 @@ import {
 } from './types';
 
 
-export function IssueLink({
+function IssueLink({
   issueId, ytBase, className,
 }: {
   issueId: string;
@@ -34,7 +38,7 @@ export function IssueLink({
   );
 }
 
-export function AuthorLink({
+function AuthorLink({
   author, login, ytBase, className,
 }: {
   author: string;
@@ -52,7 +56,7 @@ export function AuthorLink({
 }
 
 
-export function EventRow({
+function EventRow({
   item, compact = false, ytBase,
 }: {
   item: ActivityItem;
@@ -101,14 +105,37 @@ function renderEventBody(item: ActivityItem): React.ReactNode {
     return (
       <>
         commented{item.comment_text
-          ? <>: <span className="pf-event-text">{item.comment_text}</span></>
+          ? <>: <MarkdownText text={item.comment_text} /></>
           : null}
       </>
     );
   }
   if (item.activity_type === 'field_change') {
-    const from = item.old_value || '∅';
-    const to = item.new_value || '∅';
+    const oldV = item.old_value;
+    const newV = item.new_value;
+    // Rich text fields (e.g. "Affected customers") carry markdown — render it
+    // rather than cramming a blob into a state chip.
+    if (isRichText(oldV) || isRichText(newV)) {
+      return (
+        <>
+          <span className="pf-event-field">{item.field}</span>:
+          {oldV && (
+            <span className="pf-field-side">
+              <span className="pf-field-side-label">from</span>
+              <MarkdownText text={oldV} />
+            </span>
+          )}
+          {newV && (
+            <span className="pf-field-side">
+              <span className="pf-field-side-label">to</span>
+              <MarkdownText text={newV} />
+            </span>
+          )}
+        </>
+      );
+    }
+    const from = oldV || '∅';
+    const to = newV || '∅';
     return (
       <>
         <span className="pf-event-field">{item.field}</span>:{' '}
@@ -188,6 +215,11 @@ export function ByIssueView({
               <span className="pf-issue-count">
                 {iss.items.length} event{iss.items.length !== 1 ? 's' : ''}
               </span>
+              <CopyButton
+                className="pf-issue-copy report-block-btn"
+                title="Copy this issue's activity"
+                text={issueActivityToText(iss.id, iss.summary, iss.items)}
+              />
             </div>
             {stateFlow.length > 0 && (
               <div className="pf-state-flow">
@@ -412,6 +444,13 @@ export function SummaryCard({ summary }: { summary: UnifiedSummary }) {
         className="summary-markdown"
         dangerouslySetInnerHTML={{ __html: renderMarkdown(summary.summary_markdown, null) }}
       />
+      {summary.id && (
+        <div className="yt-summary-footer">
+          <Link to={`/reports/activity-summary/${summary.id}`} className="sai-open-btn">
+            View in Reports →
+          </Link>
+        </div>
+      )}
       {summary.id && (
         <CommentsSection summaryType="activity" summaryId={summary.id} />
       )}

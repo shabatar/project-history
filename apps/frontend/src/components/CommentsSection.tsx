@@ -7,11 +7,14 @@ import { useAppStore } from '../store';
 interface Props {
   summaryType: 'git' | 'activity' | 'activity-snapshot' | 'git-snapshot';
   summaryId: string;
+  /** Extra query params forwarded to the AI reply endpoint (e.g. active filters). */
+  generateParams?: Record<string, string | string[] | undefined>;
 }
 
-export function CommentsSection({ summaryType, summaryId }: Props) {
+export function CommentsSection({ summaryType, summaryId, generateParams }: Props) {
   const qc = useQueryClient();
   const savedQuestions = useAppStore((s) => s.settings.savedQuestions ?? []);
+  const model = useAppStore((s) => s.settings.defaultModel);
   const qKey = ['comments', summaryType, summaryId];
 
   const { data: comments = [], isLoading } = useQuery({
@@ -57,6 +60,7 @@ export function CommentsSection({ summaryType, summaryId }: Props) {
         comment.id,
         {
           signal: ctrl.signal,
+          params: { ...generateParams, model },
           onEvent: (ev) => {
             if (ev.type === 'done') {
               setStreamingId(null);

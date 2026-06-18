@@ -5,7 +5,7 @@ import dayjs from 'dayjs';
 import type { YouTrackBoard, YouTrackProject } from '../../lib/api';
 import { PRESET_LABELS, type RangePreset, type Scope } from './types';
 
-const ALL_PRESETS: RangePreset[] = ['yesterday', 'last-week', 'last-month', 'last-3-months', 'custom'];
+const ALL_PRESETS: RangePreset[] = ['yesterday', 'last-week', 'last-month', 'custom'];
 const COMBOBOX_LIST_CAP = 100;
 
 export interface FlowToolbarProps {

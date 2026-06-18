@@ -396,6 +396,8 @@ export default function ActivityFlow({ fixedBoard, fixedScope }: ActivityFlowPro
         setSummary(toUnifiedSummary(event.response));
         const r = event.response as { activity_count: number; model_name: string; used_llm: boolean };
         log('info', `${r.activity_count} events · model=${r.model_name}${r.used_llm ? '' : ' · fallback'}`);
+        // New summary was persisted — refresh the Reports list so it shows up immediately.
+        qc.invalidateQueries({ queryKey: ['activity-summaries'] });
       } else if (event.type === 'error') {
         log('error', event.detail);
         setSummaryError(event.detail);
@@ -403,24 +405,28 @@ export default function ActivityFlow({ fixedBoard, fixedScope }: ActivityFlowPro
     };
     const onStatus = (msg: string) => log('info', msg);
 
-    const summarizeInput = summaryStyle === 'custom'
-      ? { since, until, summary_style: summaryStyle as 'custom', custom_prompt: customPrompt }
-      : { since, until, summary_style: summaryStyle };
+    const styleInput = summaryStyle === 'custom'
+      ? { summary_style: summaryStyle as 'custom', custom_prompt: customPrompt }
+      : { summary_style: summaryStyle };
+
+    const sourceType = scope === 'board' ? 'board' : 'project';
+    const sourceId = scope === 'board'
+      ? (effectiveBoard?.id ?? '')
+      : (selected?.short_name ?? '');
+    const sourceName = selectionLabel ?? sourceId;
 
     try {
-      if (scope === 'project' && selected) {
-        await api.streamSummarizeProjectActivity(
-          selected.short_name,
-          summarizeInput,
-          { signal: ctrl.signal, onEvent, onStatus },
-        );
-      } else if (scope === 'board' && effectiveBoard) {
-        await api.streamSummarizeBoardActivity(
-          effectiveBoard.id,
-          summarizeInput,
-          { signal: ctrl.signal, onEvent, onStatus },
-        );
-      }
+      // Summarise the events already loaded in the browser — no need to re-query YouTrack.
+      await api.streamSummarizeActivityEvents(
+        {
+          since, until, ...styleInput,
+          source_type: sourceType,
+          source_id: sourceId,
+          source_name: sourceName,
+          activities: activities ?? [],
+        },
+        { signal: ctrl.signal, onEvent, onStatus },
+      );
       log('info', `Done in ${secondsSince(t0)}s`);
     } catch (e: unknown) {
       if (isAbortError(e)) {
@@ -628,8 +634,8 @@ export default function ActivityFlow({ fixedBoard, fixedScope }: ActivityFlowPro
                     <button className="btn btn-sm" onClick={() => { setPreset('last-month'); handleFetch({ since: presetToDate('last-month'), until: dayjs().format('YYYY-MM-DD') }); }}>
                       Last month
                     </button>
-                    <button className="btn btn-sm" onClick={() => { setPreset('last-3-months'); handleFetch({ since: presetToDate('last-3-months'), until: dayjs().format('YYYY-MM-DD') }); }}>
-                      3 months
+                    <button className="btn btn-sm" onClick={() => { setPreset('yesterday'); handleFetch({ since: presetToDate('yesterday'), until: dayjs().format('YYYY-MM-DD') }); }}>
+                      Yesterday
                     </button>
                   </div>
                 </>

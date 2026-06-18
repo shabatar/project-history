@@ -22,19 +22,27 @@ async def list_branches(repo_id: str, db: Session = Depends(get_db)):
     return branches
 
 @router.get("/commits", response_model=list[CommitRead])
-def list_commits(
+async def list_commits(
     repo_id: str,
     since: str | None = Query(None, description="ISO date, e.g. 2025-01-01"),
     until: str | None = Query(None, description="ISO date (default: today)"),
-    limit: int = Query(200, le=5000),
+    branch: str | None = Query(None, description="Scope to commits on this branch"),
+    limit: int = Query(5000, le=20000),
     db: Session = Depends(get_db),
 ):
     if not RepoRepository(db).get_by_id(repo_id):
         raise HTTPException(status_code=404, detail="Repository not found")
 
-    return GitService(db).get_commit_history(
-        repo_id, start_date=since, end_date=until, limit=limit
-    )
+    git = GitService(db)
+    if branch:
+        try:
+            return await git.get_branch_commits_in_range(
+                repo_id, branch, start_date=since, end_date=until, limit=limit,
+            )
+        except (GitCommandError, ValueError) as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+
+    return git.get_commit_history(repo_id, start_date=since, end_date=until, limit=limit)
 
 @router.post("/commits/parse", response_model=list[CommitRead])
 async def parse_commits(

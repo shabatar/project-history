@@ -17,6 +17,8 @@ from app.routers import commits, commit_snapshots, health, repositories, summari
 async def lifespan(app: FastAPI):
     setup_logging()
     init_db()
+    from app.services.job_manager import reconcile_orphans
+    reconcile_orphans()
     yield
 
 app = FastAPI(
@@ -39,9 +41,10 @@ app.add_middleware(
 )
 
 _rate_limit_store: dict[str, list[float]] = defaultdict(list)
-_RATE_LIMIT = 60
-_RATE_WINDOW = 60
-_MAX_BODY_SIZE = 5_242_880  # 5 MB — snapshot payloads can be larger than 1 MB
+_RATE_LIMIT = settings.rate_limit
+_RATE_WINDOW = settings.rate_limit_window
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+_MAX_BODY_SIZE = 5_242_880
 
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
@@ -53,8 +56,8 @@ async def security_middleware(request: Request, call_next):
         if origin and origin not in _ALLOWED_ORIGINS:
             return JSONResponse({"detail": "Forbidden origin"}, status_code=403)
 
-    if not is_static:
-        ip = request.client.host if request.client else "unknown"
+    ip = request.client.host if request.client else "unknown"
+    if not is_static and ip not in _LOOPBACK_HOSTS:
         now = time.time()
         _rate_limit_store[ip] = [t for t in _rate_limit_store[ip] if t > now - _RATE_WINDOW]
         if len(_rate_limit_store[ip]) >= _RATE_LIMIT:

@@ -11,11 +11,30 @@ import {
   TypeFilterChips,
 } from './activity-flow/components';
 import { classifyItem, TYPE_KEYS, type TypeKey, type RangePreset, presetToDate } from './activity-flow/types';
+import { issueUrl } from '../lib/youtrackLinks';
+
+/** Issue ID rendered as a clickable tracker link when a base URL is configured. */
+function IssueIdCell({ issueId, base }: { issueId: string; base: string | null }) {
+  const href = issueUrl(base, issueId);
+  if (!href) return <span className="it-issue-id">{issueId}</span>;
+  return (
+    <a
+      className="it-issue-id yt-issue-id"
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      onClick={(e) => e.stopPropagation()}
+      title={`Open ${issueId} in tracker`}
+    >
+      {issueId}
+    </a>
+  );
+}
 
 const RANGE_PRESETS: { key: RangePreset; label: string }[] = [
+  { key: 'yesterday', label: 'Yesterday' },
   { key: 'last-week', label: 'Last week' },
   { key: 'last-month', label: 'Last month' },
-  { key: 'last-3-months', label: '3 months' },
   { key: 'custom', label: 'Custom' },
 ];
 
@@ -276,7 +295,7 @@ export default function IssuesTracker() {
             ) : (
               searchResults.map((r) => (
                 <div key={r.issue_id} className="it-result-row">
-                  <span className="it-issue-id">{r.issue_id}</span>
+                  <IssueIdCell issueId={r.issue_id} base={ytBase} />
                   <span className="it-issue-summary">{r.summary}</span>
                   <div className="it-result-meta">
                     {r.state && <span className="it-state-chip">{r.state}</span>}
@@ -340,7 +359,7 @@ export default function IssuesTracker() {
                   onClick={() => toggleIssueSelection(t.issue_id)}
                   title="Click to toggle inclusion in activity fetch"
                 >
-                  <span className="it-issue-id">{t.issue_id}</span>
+                  <IssueIdCell issueId={t.issue_id} base={ytBase} />
                   <span className="it-issue-summary">{t.summary || '—'}</span>
                   <div className="it-result-meta">
                     {t.state && <span className="it-state-chip">{t.state}</span>}

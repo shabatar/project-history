@@ -35,9 +35,31 @@ class SummaryRepository:
         self.db.refresh(job)
         return job
 
-    def set_status(self, job: SummaryJob, status: str) -> None:
+    def set_status(self, job: SummaryJob, status: str, error: str | None = None) -> None:
         job.status = status
+        if error is not None:
+            job.error = error
         self.db.commit()
+
+    def reconcile_orphans(self) -> int:
+        """Mark jobs left in a non-terminal state as failed.
+
+        Generation runs in an in-process background task, so any job still
+        ``pending``/``running`` after a server restart is orphaned — it will
+        never complete. Flag it so the UI shows it as failed, not "running"
+        forever.
+        """
+        orphans = (
+            self.db.query(SummaryJob)
+            .filter(SummaryJob.status.in_(("pending", "running")))
+            .all()
+        )
+        for job in orphans:
+            job.status = "failed"
+            job.error = "Generation was interrupted (server restarted)."
+        if orphans:
+            self.db.commit()
+        return len(orphans)
 
     def add_result(
         self,

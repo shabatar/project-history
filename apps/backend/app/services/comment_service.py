@@ -1,16 +1,42 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import UTC, datetime
 
+from fastapi import HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.models import SummaryComment
 from app.services import ollama_service
+from app.services.cancellation import run_cancellable
 
 logger = logging.getLogger(__name__)
+
+
+def matches_terms(haystack: str, terms: list[str]) -> bool:
+    """Mirror of the frontend MultiTextFilter: a row is kept when it matches none
+    of the "-"-prefixed exclusions and (if any include terms exist) at least one
+    include term (OR)."""
+    hay = haystack.lower()
+    includes: list[str] = []
+    excludes: list[str] = []
+    for raw in terms:
+        t = (raw or "").strip()
+        if not t or t == "-":
+            continue
+        if t.startswith("-"):
+            excludes.append(t[1:].lower())
+        else:
+            includes.append(t.lower())
+    if any(e in hay for e in excludes):
+        return False
+    if not includes:
+        return True
+    return any(i in hay for i in includes)
+
 
 MAX_SUMMARY_CHARS = 4000
 MAX_QA_CHARS = 4000
@@ -57,6 +83,19 @@ def create_comment(
 
 def get_comment(db: Session, comment_id: str) -> SummaryComment | None:
     return db.get(SummaryComment, comment_id)
+
+
+def get_request_comment_or_404(
+    db: Session, comment_id: str, *, summary_type: str, summary_id: str,
+) -> SummaryComment:
+    """Fetch a comment, ensuring it belongs to the given parent and is a 'request'
+    (the only kind that can generate an AI reply). Raises HTTPException otherwise."""
+    c = get_comment(db, comment_id)
+    if not c or c.summary_type != summary_type or c.summary_id != summary_id:
+        raise HTTPException(404, "Comment not found")
+    if c.comment_type != "request":
+        raise HTTPException(400, "Only 'request' comments can generate AI replies")
+    return c
 
 
 def delete_comment(db: Session, comment_id: str) -> bool:
@@ -130,11 +169,13 @@ def build_prior_qa(
 async def stream_reply(
     db: Session,
     *,
+    request: Request,
     summary_type: str,
     parent_id: str,
     comment: SummaryComment,
     context_markdown: str,
     model: str,
+    tz: str | None = None,
 ) -> StreamingResponse:
     comment_id = comment.id
 
@@ -142,16 +183,20 @@ async def stream_reply(
         yield json.dumps({"type": "status", "phase": "generating", "model": model}) + "\n"
         prior_qa = build_prior_qa(db, summary_type, parent_id, comment_id)
         try:
-            reply = await generate_followup(
+            reply = await run_cancellable(request, generate_followup(
                 summary_markdown=context_markdown,
                 prior_qa=prior_qa,
                 question=comment.user_content,
                 model=model,
-            )
+                tz=tz,
+            ))
             update_comment_response(
                 db, comment_id, ai_response=reply, ai_status="done", model_name=model,
             )
             yield json.dumps({"type": "done", "reply": reply, "comment_id": comment_id}) + "\n"
+        except asyncio.CancelledError:
+            update_comment_response(db, comment_id, ai_response="", ai_status="cancelled")
+            return
         except Exception as exc:
             err = str(exc)
             update_comment_response(
@@ -166,12 +211,42 @@ async def stream_reply(
     )
 
 
+def _timezone_context(tz: str | None) -> str:
+    """A prompt line giving the current date/time, in the user's timezone if known."""
+    from datetime import datetime, timezone as _tz
+
+    if tz:
+        try:
+            from zoneinfo import ZoneInfo
+
+            now = datetime.now(ZoneInfo(tz))
+            return (
+                f"The user's timezone is {tz}. The current date and time there is "
+                f"{now:%Y-%m-%d %H:%M} ({now:%Z}, UTC{now:%z}). When the question involves "
+                "dates, times, or relative terms like 'today'/'yesterday', interpret and "
+                "present them in the user's timezone."
+            )
+        except Exception:
+            now = datetime.now(_tz.utc)
+            return (
+                f"The user's timezone is '{tz}'. The current UTC date and time is "
+                f"{now:%Y-%m-%d %H:%M}. Convert any time-related answers to the user's "
+                "timezone when relevant."
+            )
+    now = datetime.now(_tz.utc)
+    return (
+        f"The current date and time is {now:%Y-%m-%d %H:%M} UTC. Use UTC for any "
+        "time-related answers unless the user specifies otherwise."
+    )
+
+
 async def generate_followup(
     *,
     summary_markdown: str,
     prior_qa: list[tuple[str, str]],
     question: str,
     model: str,
+    tz: str | None = None,
 ) -> str:
     summary_excerpt = summary_markdown[:MAX_SUMMARY_CHARS]
     if len(summary_markdown) > MAX_SUMMARY_CHARS:
@@ -180,7 +255,8 @@ async def generate_followup(
     prompt = (
         "You are a helpful assistant analyzing project progress. "
         "Answer the question using ONLY the summary and conversation history below. "
-        "Be specific, reference issue IDs and facts from the summary where relevant.\n\n"
+        "Be specific, reference issue IDs and facts from the summary where relevant.\n"
+        f"{_timezone_context(tz)}\n\n"
         f"## Original Summary\n\n{summary_excerpt}\n"
     )
 

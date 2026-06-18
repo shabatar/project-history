@@ -4,8 +4,8 @@ import { renderMarkdown } from '../components/SummaryPanel';
 describe('renderMarkdown', () => {
   it('renders headings', () => {
     const html = renderMarkdown('## Title\n### Subtitle', null);
-    expect(html).toContain('<h3>Title</h3>');
-    expect(html).toContain('<h4>Subtitle</h4>');
+    expect(html).toContain('<h2>Title</h2>');
+    expect(html).toContain('<h3>Subtitle</h3>');
   });
 
   it('renders bullet lists', () => {
@@ -34,7 +34,7 @@ describe('renderMarkdown', () => {
   });
 
   it('renders horizontal rules', () => {
-    const html = renderMarkdown('Above\n---\nBelow', null);
+    const html = renderMarkdown('Above\n\n---\n\nBelow', null);
     expect(html).toMatch(/<hr\s*\/?>/);
   });
 
@@ -47,11 +47,12 @@ describe('renderMarkdown', () => {
     expect(html).toContain('<td>2</td>');
   });
 
-  it('escapes HTML entities', () => {
-    const html = renderMarkdown('Use <script> & "quotes"', null);
-    expect(html).toContain('&lt;script&gt;');
-    expect(html).toContain('&amp;');
+  it('strips dangerous HTML and escapes ampersands', () => {
+    const html = renderMarkdown('Use <script>alert(1)</script> & "quotes"', null);
+    // DOMPurify removes the script element entirely; marked escapes the ampersand.
     expect(html).not.toContain('<script>');
+    expect(html).not.toContain('alert(1)');
+    expect(html).toContain('&amp;');
   });
 
   it('handles empty input', () => {

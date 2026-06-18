@@ -10,7 +10,6 @@ export type RangePreset =
   | 'yesterday'
   | 'last-week'
   | 'last-month'
-  | 'last-3-months'
   | 'custom';
 
 export const TYPE_KEYS = ['created', 'resolved', 'comment', 'state', 'assignee', 'other'] as const;
@@ -75,7 +74,6 @@ export function presetToDate(preset: Exclude<RangePreset, 'custom'>): string {
     case 'yesterday': return now.subtract(1, 'day').format('YYYY-MM-DD');
     case 'last-week': return now.subtract(7, 'day').format('YYYY-MM-DD');
     case 'last-month': return now.subtract(1, 'month').format('YYYY-MM-DD');
-    case 'last-3-months': return now.subtract(3, 'month').format('YYYY-MM-DD');
   }
 }
 
@@ -83,6 +81,5 @@ export const PRESET_LABELS: Record<RangePreset, string> = {
   yesterday: 'Yesterday',
   'last-week': 'Last week',
   'last-month': 'Last month',
-  'last-3-months': '3 months',
   custom: 'Custom',
 };

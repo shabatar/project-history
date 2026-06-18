@@ -57,8 +57,4 @@ describe('presetToDate', () => {
     expect(presetToDate('last-month')).toBe(now.subtract(1, 'month').format('YYYY-MM-DD'));
   });
 
-  it('last-3-months is three calendar months ago', () => {
-    const now = dayjs();
-    expect(presetToDate('last-3-months')).toBe(now.subtract(3, 'month').format('YYYY-MM-DD'));
-  });
 });

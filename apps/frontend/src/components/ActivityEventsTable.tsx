@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import dayjs from 'dayjs';
 import type { ActivityItem } from '../lib/api';
+import { MarkdownText, isRichText } from './MarkdownText';
 
 const ACTIVITY_TYPE_LABELS: Record<string, string> = {
   created: 'Created',
@@ -76,18 +77,22 @@ export function ActivityEventsTable({
                 </td>
                 <td className="snap-detail">
                   {ev.activity_type === 'comment' && ev.comment_text ? (
-                    <span className="snap-comment-text">
-                      {compact && ev.comment_text.length > 100
-                        ? ev.comment_text.slice(0, 100) + '…'
-                        : ev.comment_text}
-                    </span>
+                    <MarkdownText text={ev.comment_text} />
                   ) : ev.activity_type === 'field_change' ? (
-                    <span>
-                      {ev.field}:{' '}
-                      <span className="snap-old">{ev.old_value ?? '—'}</span>
-                      {' → '}
-                      <span className="snap-new">{ev.new_value ?? '—'}</span>
-                    </span>
+                    isRichText(ev.old_value) || isRichText(ev.new_value) ? (
+                      <span>
+                        {ev.field}:
+                        {ev.old_value && <MarkdownText text={ev.old_value} />}
+                        {ev.new_value && <MarkdownText text={ev.new_value} />}
+                      </span>
+                    ) : (
+                      <span>
+                        {ev.field}:{' '}
+                        <span className="snap-old">{ev.old_value ?? '—'}</span>
+                        {' → '}
+                        <span className="snap-new">{ev.new_value ?? '—'}</span>
+                      </span>
+                    )
                   ) : null}
                 </td>
               </tr>

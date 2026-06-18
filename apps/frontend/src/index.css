@@ -760,6 +760,21 @@ select.input { cursor: pointer; }
   flex-shrink: 0;
   opacity: 0.7;
 }
+a.commit-sha-link {
+  text-decoration: none;
+  cursor: pointer;
+}
+/* PROJECT-123 issue references inside commit messages */
+.issue-ref-link {
+  color: var(--primary, #7c5cff);
+  text-decoration: none;
+  font-weight: 500;
+}
+.issue-ref-link:hover { text-decoration: underline; }
+a.commit-sha-link:hover {
+  opacity: 1;
+  text-decoration: underline;
+}
 
 .commit-message {
   flex: 1;
@@ -1014,6 +1029,41 @@ select.input { cursor: pointer; }
   font-size: 0.875rem;
 }
 
+.summ-item-generating {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted, #888);
+  font-size: 0.875rem;
+}
+
+/* Live status pill in the report list header */
+.summ-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.summ-status-running { background: rgba(66, 153, 225, 0.15); color: #3182ce; }
+.summ-status-failed { background: rgba(229, 62, 62, 0.15); color: var(--danger, #e53e3e); }
+.summ-status-cancelled { background: rgba(160, 160, 160, 0.18); color: var(--text-muted, #888); }
+
+.report-generating {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 16px 0;
+  padding: 12px 16px;
+  border-radius: 8px;
+  background: rgba(66, 153, 225, 0.08);
+  color: #3182ce;
+  font-size: 0.9rem;
+}
+
 .summ-item-actions {
   margin-top: 10px;
   display: flex;
@@ -1105,6 +1155,211 @@ select.input { cursor: pointer; }
 .report-delete-btn:hover {
   color: var(--danger, #e53e3e);
   border-color: var(--danger, #e53e3e);
+}
+
+.summ-ai-btn {
+  background: none;
+  border: 1px solid var(--accent, #3182ce);
+  border-radius: 12px;
+  cursor: pointer;
+  color: var(--accent, #3182ce);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  padding: 2px 10px;
+  margin-left: 6px;
+  white-space: nowrap;
+  transition: background 0.15s, color 0.15s, box-shadow 0.15s;
+}
+.summ-ai-btn:hover {
+  background: var(--accent, #3182ce);
+  color: #fff;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent, #3182ce) 25%, transparent);
+}
+.summ-ai-btn.active {
+  background: var(--accent, #3182ce);
+  color: #fff;
+}
+
+/* ── AI summarize inline panel ── */
+.sai-panel {
+  margin: 0 14px 10px;
+  padding: 12px 14px;
+  background: color-mix(in srgb, var(--accent, #3182ce) 6%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--accent, #3182ce) 30%, var(--border));
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.sai-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.sai-style-chips {
+  display: flex;
+  gap: 4px;
+}
+.sai-chip {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  cursor: pointer;
+  color: var(--text-muted, #666);
+  font-size: 0.78rem;
+  font-weight: 500;
+  padding: 3px 12px;
+  transition: all 0.13s;
+}
+.sai-chip:hover:not(:disabled) {
+  border-color: var(--accent, #3182ce);
+  color: var(--accent, #3182ce);
+}
+.sai-chip.active {
+  background: var(--accent, #3182ce);
+  border-color: var(--accent, #3182ce);
+  color: #fff;
+}
+.sai-chip:disabled { opacity: 0.5; cursor: default; }
+.sai-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+.sai-generate-btn {
+  background: var(--accent, #3182ce);
+  border: none;
+  border-radius: 6px;
+  color: #fff;
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 600;
+  padding: 5px 14px;
+  transition: opacity 0.15s, transform 0.1s;
+}
+.sai-generate-btn:hover:not(:disabled) { opacity: 0.88; transform: translateY(-1px); }
+.sai-generate-btn:disabled { opacity: 0.45; cursor: default; transform: none; }
+.sai-cancel-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--text-muted, #666);
+  font-size: 0.78rem;
+  padding: 4px 10px;
+}
+.sai-cancel-btn:hover { border-color: var(--danger, #e53e3e); color: var(--danger, #e53e3e); }
+.sai-phase {
+  font-size: 0.78rem;
+  color: var(--text-muted, #888);
+  font-style: italic;
+}
+.sai-generating { align-items: center; gap: 8px; }
+.sai-generating-prompt {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.78rem;
+  color: var(--text-muted, #888);
+  font-style: italic;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sai-generating .sai-cancel-btn { margin-left: auto; }
+@keyframes sai-spin { to { transform: rotate(360deg); } }
+.sai-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid color-mix(in srgb, var(--accent, #3182ce) 30%, transparent);
+  border-top-color: var(--accent, #3182ce);
+  border-radius: 50%;
+  animation: sai-spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+.sai-prompt {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  font-size: 0.82rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 10px;
+  background: var(--surface);
+  color: var(--text);
+  font-family: inherit;
+  line-height: 1.4;
+}
+.sai-prompt:focus { outline: none; border-color: var(--accent, #3182ce); }
+.sai-error {
+  font-size: 0.8rem;
+  color: var(--danger, #e53e3e);
+  margin: 0;
+  padding: 6px 10px;
+  background: color-mix(in srgb, var(--danger, #e53e3e) 8%, var(--surface));
+  border-radius: 4px;
+}
+.sai-success {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.sai-success-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  background: #22c55e;
+  color: #fff;
+  border-radius: 50%;
+  font-size: 0.75rem;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.sai-success-text {
+  font-size: 0.85rem;
+  color: var(--text);
+  font-weight: 500;
+}
+.sai-open-btn {
+  background: var(--accent, #3182ce);
+  border: none;
+  border-radius: 6px;
+  color: #fff;
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 600;
+  padding: 4px 12px;
+  margin-left: auto;
+  transition: opacity 0.15s;
+}
+.sai-open-btn:hover { opacity: 0.85; }
+.sai-regen-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--text-muted, #666);
+  font-size: 0.78rem;
+  padding: 4px 10px;
+}
+.sai-regen-btn:hover { border-color: var(--accent, #3182ce); color: var(--accent, #3182ce); }
+
+.sai-panel-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.yt-summary-footer {
+  display: flex;
+  align-items: center;
+  margin-top: 4px;
 }
 
 /* Activity summary body */
@@ -1786,6 +2041,52 @@ select.input { cursor: pointer; }
   margin: 16px 0;
 }
 
+/* Elements emitted by the markdown renderer (marked) that weren't covered above */
+.report-content h1 { font-size: 1.35em; font-weight: 700; color: var(--text-h, var(--text)); margin: 14px 0 8px; }
+.report-content h6 { font-size: 0.95em; font-weight: 600; color: var(--text-h, var(--text)); margin: 12px 0 6px; }
+.report-content blockquote {
+  margin: 10px 0;
+  padding: 4px 0 4px 14px;
+  border-left: 3px solid color-mix(in srgb, var(--primary, #7c5cff) 50%, transparent);
+  color: var(--text-muted);
+  font-style: italic;
+  background: color-mix(in srgb, var(--primary, #7c5cff) 4%, transparent);
+  border-radius: 0 4px 4px 0;
+}
+.report-content pre {
+  margin: 10px 0;
+  padding: 10px 14px;
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow-x: auto;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.report-content pre code { background: none; border: none; padding: 0; }
+.report-content table {
+  border-collapse: collapse;
+  margin: 10px 0;
+  font-size: 13px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.report-content th,
+.report-content td {
+  padding: 6px 12px;
+  text-align: left;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+}
+.report-content th {
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.report-content tbody tr:last-child td { border-bottom: none; }
+
 /* ── Tables inside reports ── */
 .report-table-wrap {
   overflow-x: auto;
@@ -1886,6 +2187,40 @@ select.input { cursor: pointer; }
   max-width: 720px;
 }
 
+/* ── Report content block: collapse/expand + copy toolbar ── */
+.report-block-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 8px 10px 0;
+}
+.report-block-btn {
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-muted, #888);
+  cursor: pointer;
+  font-size: 0.76rem;
+  font-weight: 600;
+  padding: 3px 10px;
+  transition: border-color 0.15s, color 0.15s;
+}
+.report-block-btn:hover {
+  border-color: var(--primary, #7c5cff);
+  color: var(--primary, #7c5cff);
+}
+.report-collapsed-note {
+  padding: 14px 16px;
+  margin: 0 4px 4px;
+  color: var(--text-muted, #888);
+  font-size: 0.85rem;
+  font-style: italic;
+  text-align: center;
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+}
+
 /* ── Error Boundary ── */
 .error-boundary {
   display: flex;
@@ -1945,13 +2280,7 @@ select.input { cursor: pointer; }
   margin-bottom: 12px;
 }
 
-/* ── Commit Explorer ── */
-.ce-repo-picker {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
+/* ── Commit repo picker chips (Commit Workbench) ── */
 .ce-repo-chips {
   display: flex;
   flex-wrap: wrap;
@@ -1994,67 +2323,10 @@ select.input { cursor: pointer; }
   font-style: italic;
 }
 
-.ce-view-toggle {
-  display: inline-flex;
-  background: var(--accent-bg);
-  border-radius: var(--radius-xs);
-  padding: 2px;
-  gap: 0;
-}
-
-.ce-view-toggle .btn {
-  border: none;
-  border-radius: var(--radius-xs);
-  background: transparent;
-  font-size: 11.5px;
-}
-
-.ce-view-toggle .btn-primary {
-  background: var(--surface);
-  color: var(--text-h);
-  box-shadow: var(--shadow-sm);
-  font-weight: 600;
-}
-
-.ce-actions-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 10px;
-}
-
 .ce-count {
   font-size: 11.5px;
   color: var(--text);
   font-weight: 500;
-}
-
-.ce-side-by-side {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
-  gap: 12px;
-}
-
-.ce-panel {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  overflow: hidden;
-}
-
-.ce-panel-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--border);
-  background: var(--accent-bg);
-}
-
-.ce-panel-name {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-h);
 }
 
 /* ── Commit table: badge sizing ── */
@@ -2629,6 +2901,47 @@ select.input { cursor: pointer; }
   color: var(--text-muted);
 }
 
+/* Rendered markdown inside a comment event */
+.pf-comment-md {
+  display: block;
+  margin-top: 4px;
+  color: var(--text);
+  max-height: 320px;
+  overflow: auto;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.pf-comment-md > :first-child { margin-top: 0; }
+.pf-comment-md > :last-child { margin-bottom: 0; }
+.pf-comment-md p { margin: 0 0 6px; }
+.pf-comment-md pre,
+.pf-comment-md code {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+/* Rich (markdown) field-change values, e.g. "Affected customers" */
+.pf-field-side {
+  display: block;
+  margin-top: 4px;
+}
+.pf-field-side-label {
+  display: inline-block;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin-bottom: 2px;
+}
+
+/* Raw text shown while a large comment's markdown renders in the background */
+.pf-comment-pending {
+  display: block;
+  margin-top: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  opacity: 0.7;
+}
+
 .pf-event-field {
   font-weight: 500;
   color: var(--text);
@@ -2701,6 +3014,12 @@ select.input { cursor: pointer; }
 .pf-issue-count {
   color: var(--text-muted);
   font-size: 11px;
+}
+.pf-issue-copy {
+  align-self: center;
+  flex-shrink: 0;
+  padding: 2px 8px;
+  font-size: 0.72rem;
 }
 
 .pf-state-flow {
@@ -3640,7 +3959,6 @@ select.input { cursor: pointer; }
   .report-header-left { flex-direction: column; gap: 4px; }
   .detail-meta-bar { flex-direction: column; gap: 6px; }
   .summary-mode-toggle { flex-wrap: wrap; }
-  .ce-side-by-side { grid-template-columns: 1fr; }
   .ce-repo-chips { flex-wrap: wrap; }
 }
 
@@ -4057,11 +4375,25 @@ select.input { cursor: pointer; }
   border-radius: var(--radius-sm);
   gap: 10px;
 }
+.cw-capped-note {
+  margin-right: auto;
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: #d97706;
+  white-space: nowrap;
+  cursor: help;
+}
 .cw-actions {
   display: flex;
   align-items: center;
   gap: 6px;
 }
+/* Multi-filter sits between the count and the actions, taking the free space. */
+.cw-commits-bar .mtf.cw-filter {
+  flex: 1;
+  min-width: 200px;
+}
+.cw-commits-bar .cw-actions { margin-left: auto; }
 
 .cw-generate-panel {
   margin-top: 20px;
@@ -4147,6 +4479,53 @@ select.input { cursor: pointer; }
 .snap-detail-search {
   width: 220px;
 }
+
+/* ── Multi text filter (chips + input) ── */
+.mtf {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.mtf.snap-detail-search {
+  width: auto;
+  min-width: 220px;
+  flex: 1 1 220px;
+  max-width: 520px;
+}
+.mtf-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px 2px 9px;
+  font-size: 11.5px;
+  font-weight: 500;
+  background: color-mix(in srgb, var(--primary, #7c5cff) 14%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--primary, #7c5cff) 35%, var(--border));
+  color: var(--text);
+  border-radius: 12px;
+  white-space: nowrap;
+}
+.mtf-chip-x {
+  border: none;
+  background: none;
+  color: var(--text-muted, #888);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+}
+.mtf-chip-x:hover { color: var(--danger, #e53e3e); }
+.mtf-chip-exclude {
+  background: color-mix(in srgb, var(--danger, #e53e3e) 12%, var(--surface));
+  border-color: color-mix(in srgb, var(--danger, #e53e3e) 35%, var(--border));
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+.mtf-input {
+  flex: 1;
+  min-width: 120px;
+}
 .snap-type-chips {
   display: flex;
   gap: 5px;
@@ -4230,6 +4609,7 @@ select.input { cursor: pointer; }
   margin: 0;
 }
 
+
 .snap-table {
   width: 100%;
   border-collapse: collapse;
@@ -4297,7 +4677,7 @@ select.input { cursor: pointer; }
 }
 .snap-pager-label { font-size: 0.8rem; color: var(--text-muted, #888); }
 
-/* ── Snapshot save button (CommitExplorer + ActivityFlow) ── */
+/* ── Snapshot save button (Commit Workbench + Activity) ── */
 .pf-snapshot-btn {
   transition: background 0.15s, color 0.15s;
 }
@@ -4309,14 +4689,6 @@ select.input { cursor: pointer; }
 .snapshot-save-error {
   font-size: 11px;
   color: var(--danger);
-}
-
-/* ── CommitExplorer action row buttons ── */
-.ce-actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-left: auto;
 }
 
 /* ── Issues Tracker (it-*) ─────────────────────────────────────────── */

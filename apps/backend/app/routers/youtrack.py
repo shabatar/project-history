@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import re
 import threading
 from typing import Callable
 
@@ -14,15 +15,16 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import get_db
 from app.database import SessionLocal
+from app.services import job_manager
 from app.models import ActivitySnapshot, ActivitySummary, SummaryComment, TrackedIssue, YouTrackBoard, YouTrackConfig, YouTrackIssueSnapshot
 from app.schemas import (
     ActivityItem,
     ActivityRequest,
     ActivitySnapshotCreate,
     ActivitySnapshotRead,
+    ActivitySnapshotSummarizeRequest,
     ActivitySummaryRead,
-    ActivitySummaryRequest,
-    ActivitySummaryResponse,
+    ActivitySummaryFromEventsRequest,
     BoardActivityResponse,
     BoardSyncRequest,
     BoardSyncResult,
@@ -30,7 +32,6 @@ from app.schemas import (
     IssueSearchResult,
     ItemLabelUpdate,
     ProjectActivityResponse,
-    ProjectActivitySummaryResponse,
     SummaryCommentCreate,
     SummaryCommentRead,
     TrackedIssueCreate,
@@ -50,7 +51,6 @@ from app.services.youtrack_service import (
     extract_base_url,
     extract_board_id,
     fetch_activities,
-    fetch_activities_cached,
     fetch_board_info,
     fetch_issues_activity,
     get_issue_state,
@@ -76,7 +76,6 @@ def _get_token(db: Session) -> str:
             "or the PT_YOUTRACK_API_TOKEN env var.",
         )
     except ValueError as e:
-        # Decryption failed — secret key likely changed
         raise HTTPException(500, f"Stored token could not be decrypted: {e}")
 
 
@@ -101,7 +100,6 @@ def _config_payload(cfg: YouTrackConfig) -> YouTrackConfigRead:
     )
 
 
-# ── Config ──
 
 @router.get("/config", response_model=YouTrackConfigRead | None)
 def get_config(db: Session = Depends(get_db)):
@@ -191,7 +189,6 @@ def test_connection(body: YouTrackTestRequest, db: Session = Depends(get_db)):
     )
 
 
-# ── Boards ──
 
 @router.get("/boards", response_model=list[YouTrackBoardRead])
 def list_boards(db: Session = Depends(get_db)):
@@ -241,7 +238,6 @@ def remove_board(board_db_id: str, db: Session = Depends(get_db)):
     db.commit()
 
 
-# ── Sync & Issues ──
 
 def _persist_activity_summary(
     *,
@@ -277,7 +273,7 @@ def _persist_activity_summary(
         db.commit()
         db.refresh(row)
         return row.id
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.warning("Failed to persist activity summary: %s", e)
         db.rollback()
         return ""
@@ -368,7 +364,6 @@ def list_board_issues(board_db_id: str, db: Session = Depends(get_db)):
     )
 
 
-# ── Activity ──
 
 @router.post("/boards/{board_db_id}/activity", response_model=BoardActivityResponse)
 async def get_board_activity(
@@ -433,95 +428,6 @@ async def get_board_activity(
     )
 
 
-@router.post("/boards/{board_db_id}/activity/summarize", response_model=ActivitySummaryResponse)
-async def summarize_board_activity(
-    board_db_id: str,
-    body: ActivitySummaryRequest,
-    request: Request,
-    db: Session = Depends(get_db),
-):
-    """Fetch activity in range, then ask the LLM to summarize it.
-
-    Gated on YouTrack mode: the entire /youtrack router is only registered
-    when PT_YOUTRACK_ENABLED is true.
-    """
-    board = db.get(YouTrackBoard, board_db_id)
-    if not board:
-        raise HTTPException(404, "Board not found")
-
-    token = _get_token(db)
-    base_url = _get_base_url(db)
-    if not base_url:
-        raise HTTPException(400, "YouTrack base URL not configured")
-
-    from datetime import datetime, timedelta, timezone
-
-    try:
-        since_dt = datetime.strptime(body.since, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        until_dt = datetime.strptime(body.until, "%Y-%m-%d").replace(
-            hour=23, minute=59, second=59, tzinfo=timezone.utc
-        )
-    except ValueError:
-        raise HTTPException(422, "Invalid date format. Use YYYY-MM-DD.")
-
-    if since_dt > until_dt:
-        raise HTTPException(422, "'since' date must not be after 'until' date.")
-    if until_dt - since_dt > timedelta(days=180):
-        raise HTTPException(422, "Date range must not exceed 180 days.")
-
-    since_ts = int(since_dt.timestamp() * 1000)
-    until_ts = int(until_dt.timestamp() * 1000)
-
-    try:
-        project_ids = get_board_project_ids(base_url, token, board.board_id)
-    except Exception as e:
-        raise HTTPException(502, f"Failed to get board projects: {e}")
-    if not project_ids:
-        raise HTTPException(404, "No projects found for this board")
-
-    try:
-        activities, _cancelled = await _run_with_cancel_watch(
-            request, fetch_activities, base_url, token, project_ids, since_ts, until_ts,
-        )
-    except Exception as e:
-        raise HTTPException(502, f"YouTrack activities API error: {e}")
-
-    style = body.summary_style or "detailed"
-    model = body.model_name or settings.default_model
-
-    markdown, used_llm = await activity_summary_service.summarize_activity(
-        board_name=board.board_name or board.board_id,
-        since=body.since,
-        until=body.until,
-        activities=activities,
-        style=style,
-        model=model,
-    )
-
-    _persist_activity_summary(
-        source_type="board",
-        source_id=board.id,
-        source_name=board.board_name or board.board_id,
-        since=body.since, until=body.until, style=style, model=model,
-        activity_count=len(activities), markdown=markdown, used_llm=used_llm,
-    )
-
-    from datetime import datetime as _dt, timezone as _tz  # noqa: PLC0415
-    return ActivitySummaryResponse(
-        board_id=board.id,
-        board_name=board.board_name,
-        since=body.since,
-        until=body.until,
-        summary_style=style,
-        model_name=model,
-        activity_count=len(activities),
-        summary_markdown=markdown,
-        used_llm=used_llm,
-        generated_at=_dt.now(_tz.utc),
-    )
-
-
-# ── Projects ──
 
 @router.get("/projects", response_model=list[YouTrackProjectRead])
 def list_youtrack_projects(
@@ -575,7 +481,7 @@ async def _run_with_cancel_watch(
                 await asyncio.sleep(0.5)
         except asyncio.CancelledError:
             raise
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("Disconnect watcher error: %s", e)
 
     w = asyncio.create_task(watcher())
@@ -606,60 +512,6 @@ def _parse_date_range(since: str, until: str, max_days: int = 180):
     return int(s.timestamp() * 1000), int(u.timestamp() * 1000)
 
 
-@router.post("/projects/{short_name}/activity", response_model=ProjectActivityResponse)
-async def get_project_activity(
-    short_name: str,
-    body: ActivityRequest,
-    request: Request,
-    db: Session = Depends(get_db),
-):
-    """Fetch all activity across an entire project in a date range.
-
-    Cancellation: the per-issue fetch loop is interrupted when the client
-    disconnects (Axios AbortController from the UI), saving YouTrack API calls.
-    """
-    token = _get_token(db)
-    base_url = _get_base_url(db)
-    if not base_url:
-        raise HTTPException(400, "YouTrack base URL not configured")
-
-    since_ts, until_ts = _parse_date_range(body.since, body.until)
-
-    # Resolve project name (best-effort; fall back to short_name)
-    project_name = short_name
-    try:
-        projects = list_projects(base_url, token, include_archived=True)
-        match = next((p for p in projects if p["short_name"] == short_name), None)
-        if match:
-            project_name = match["name"]
-    except Exception as e:
-        logger.warning("Failed to resolve project name for %s: %s", short_name, e)
-
-    try:
-        activities, cancelled = await _run_with_cancel_watch(
-            request,
-            fetch_activities,
-            base_url, token, [short_name], since_ts, until_ts,
-        )
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 404:
-            raise HTTPException(404, f"Project '{short_name}' not found on YouTrack")
-        raise HTTPException(502, f"YouTrack activities API error: {e}")
-    except Exception as e:
-        raise HTTPException(502, f"YouTrack activities API error: {e}")
-
-    if cancelled:
-        logger.info("get_project_activity returning after client cancel: %d events", len(activities))
-
-    return ProjectActivityResponse(
-        project_short_name=short_name,
-        project_name=project_name,
-        since=body.since,
-        until=body.until,
-        activities=activities,
-    )
-
-
 @router.post("/projects/{short_name}/activity/stream")
 async def stream_project_activity(
     short_name: str,
@@ -683,7 +535,6 @@ async def stream_project_activity(
 
     since_ts, until_ts = _parse_date_range(body.since, body.until)
 
-    # Resolve project name (best-effort)
     project_name = short_name
     try:
         projects = list_projects(base_url, token, include_archived=True)
@@ -698,10 +549,9 @@ async def stream_project_activity(
     stop = threading.Event()
 
     def on_progress(info: dict) -> None:
-        # Runs in the worker thread — hand off to the loop safely.
         try:
             asyncio.run_coroutine_threadsafe(queue.put({"type": "progress", **info}), loop)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
     async def disconnect_watcher() -> None:
@@ -714,7 +564,7 @@ async def stream_project_activity(
                 await asyncio.sleep(0.5)
         except asyncio.CancelledError:
             raise
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("stream disconnect watcher error: %s", e)
 
     async def runner() -> None:
@@ -739,14 +589,13 @@ async def stream_project_activity(
                 else f"YouTrack API error: {e}"
             )
             await queue.put({"type": "error", "detail": detail})
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             await queue.put({"type": "error", "detail": f"YouTrack API error: {e}"})
 
     async def generate():
         watcher = asyncio.create_task(disconnect_watcher())
         task = asyncio.create_task(runner())
         try:
-            # announce start immediately so the client sees "we're working"
             yield json.dumps({"type": "status", "phase": "started", "project_name": project_name, "short_name": short_name}) + "\n"
             while True:
                 msg = await queue.get()
@@ -760,14 +609,13 @@ async def stream_project_activity(
             for t in (watcher, task):
                 try:
                     await t
-                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                except (asyncio.CancelledError, Exception):
                     pass
 
     return StreamingResponse(
         generate(),
         media_type="application/x-ndjson",
         headers={
-            # Prevent intermediate (browser/proxy/CDN) buffering of the stream
             "Cache-Control": "no-cache, no-store, no-transform",
             "X-Accel-Buffering": "no",
             "Connection": "keep-alive",
@@ -775,209 +623,105 @@ async def stream_project_activity(
     )
 
 
-@router.post(
-    "/projects/{short_name}/activity/summarize",
-    response_model=ProjectActivitySummaryResponse,
-)
-async def summarize_project_activity(
-    short_name: str,
-    body: ActivitySummaryRequest,
-    request: Request,
-    db: Session = Depends(get_db),
-):
-    """Fetch project activity in range, then ask the LLM to summarize it.
-
-    Cancellation: the activity fetch (usually the longest step) is cancelled
-    when the client disconnects. If the LLM is already running when the user
-    cancels, the response will still be generated but discarded by the client.
-    """
-    token = _get_token(db)
-    base_url = _get_base_url(db)
-    if not base_url:
-        raise HTTPException(400, "YouTrack base URL not configured")
-
-    since_ts, until_ts = _parse_date_range(body.since, body.until)
-
-    project_name = short_name
-    try:
-        projects = list_projects(base_url, token, include_archived=True)
-        match = next((p for p in projects if p["short_name"] == short_name), None)
-        if match:
-            project_name = match["name"]
-    except Exception as e:
-        logger.warning("Failed to resolve project name for %s: %s", short_name, e)
-
-    try:
-        # Reuse a just-fetched window instead of hitting YouTrack again.
-        activities, _cancelled = await _run_with_cancel_watch(
-            request,
-            fetch_activities_cached,
-            base_url, token, [short_name], since_ts, until_ts,
-        )
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 404:
-            raise HTTPException(404, f"Project '{short_name}' not found on YouTrack")
-        raise HTTPException(502, f"YouTrack activities API error: {e}")
-    except Exception as e:
-        raise HTTPException(502, f"YouTrack activities API error: {e}")
-
-    style = body.summary_style or "detailed"
-    model = body.model_name or settings.default_model
-
-    markdown, used_llm = await activity_summary_service.summarize_activity(
-        board_name=f"{project_name} ({short_name})",
-        since=body.since,
-        until=body.until,
-        activities=activities,
-        style=style,
-        model=model,
-    )
-
-    _persist_activity_summary(
-        source_type="project",
-        source_id=short_name,
-        source_name=f"{project_name} ({short_name})",
-        since=body.since, until=body.until, style=style, model=model,
-        activity_count=len(activities), markdown=markdown, used_llm=used_llm,
-    )
-
-    from datetime import datetime as _dt, timezone as _tz  # noqa: PLC0415
-    return ProjectActivitySummaryResponse(
-        project_short_name=short_name,
-        project_name=project_name,
-        since=body.since,
-        until=body.until,
-        summary_style=style,
-        model_name=model,
-        activity_count=len(activities),
-        summary_markdown=markdown,
-        used_llm=used_llm,
-        generated_at=_dt.now(_tz.utc),
-    )
-
-
-# ── Streaming summarize: emits phase/progress events, then final done payload ──
-
-def _stream_summarize(
+def _stream_activity_summary(
     *,
     request: Request,
-    token: str,
-    base_url: str,
-    project_ids: list[str],
+    activities: list[ActivityItem],
     display_name: str,
-    body: ActivitySummaryRequest,
-    since_ts: int,
-    until_ts: int,
-    build_response: Callable[[list[ActivityItem], str, str, bool], dict],
+    since: str,
+    until: str,
+    style: str,
+    model: str,
+    custom_prompt: str | None,
     persist_source_type: str,
     persist_source_id: str,
-):
-    """Shared NDJSON generator for summarize streams (project + board)."""
-    from datetime import datetime as _dt, timezone as _tz  # noqa: PLC0415
+    initial_phase: str = "generating",
+) -> StreamingResponse:
+    """Summarise a fixed set of activities, streaming NDJSON (status/token/done/error)
+    and persisting the result as a new ActivitySummary. Shared by the inline-events
+    and saved-snapshot summarize endpoints."""
+    from datetime import datetime as _dt, timezone as _tz
 
-    style = body.summary_style or "detailed"
-    model = body.model_name or settings.default_model
-    loop = asyncio.get_event_loop()
     queue: asyncio.Queue[dict] = asyncio.Queue()
-    stop = threading.Event()
-
-    def on_progress(info: dict) -> None:
-        try:
-            asyncio.run_coroutine_threadsafe(queue.put({"type": "progress", **info}), loop)
-        except Exception:  # noqa: BLE001
-            pass
-
-    async def disconnect_watcher() -> None:
-        try:
-            while not stop.is_set():
-                if await request.is_disconnected():
-                    stop.set()
-                    return
-                await asyncio.sleep(0.5)
-        except asyncio.CancelledError:
-            raise
 
     async def runner() -> None:
         try:
-            # Reuse a just-fetched window instead of hitting YouTrack again.
-            activities = await asyncio.to_thread(
-                fetch_activities_cached,
-                base_url, token, project_ids, since_ts, until_ts,
-                stop.is_set, on_progress,
-            )
             await queue.put({"type": "status", "phase": "generating", "model": model, "activity_count": len(activities)})
-            custom_prompt = body.custom_prompt if style == "custom" else None
+
+            async def on_token(text: str) -> None:
+                await queue.put({"type": "token", "text": text})
+
             markdown, used_llm = await activity_summary_service.summarize_activity(
-                board_name=display_name,
-                since=body.since,
-                until=body.until,
-                activities=activities,
-                style=style,
-                model=model,
-                custom_prompt=custom_prompt,
+                board_name=display_name, since=since, until=until, activities=activities,
+                style=style, model=model, custom_prompt=custom_prompt, on_token=on_token,
             )
-            response = build_response(activities, markdown, model, used_llm)
-            response["generated_at"] = _dt.now(_tz.utc).isoformat()
-            response["summary_style"] = style
-            response["model_name"] = model
-            response["activity_count"] = len(activities)
-            response["summary_markdown"] = markdown
-            response["used_llm"] = used_llm
-            response["since"] = body.since
-            response["until"] = body.until
-            if custom_prompt:
-                response["custom_prompt"] = custom_prompt
             saved_id = _persist_activity_summary(
-                source_type=persist_source_type,
-                source_id=persist_source_id,
-                source_name=display_name,
-                since=body.since, until=body.until, style=style, model=model,
+                source_type=persist_source_type, source_id=persist_source_id,
+                source_name=display_name, since=since, until=until, style=style, model=model,
                 activity_count=len(activities), markdown=markdown, used_llm=used_llm,
                 custom_prompt=custom_prompt,
             )
+            response: dict = {
+                "since": since, "until": until, "summary_style": style, "model_name": model,
+                "activity_count": len(activities), "summary_markdown": markdown,
+                "used_llm": used_llm, "generated_at": _dt.now(_tz.utc).isoformat(),
+            }
+            if custom_prompt:
+                response["custom_prompt"] = custom_prompt
             if saved_id:
                 response["id"] = saved_id
             await queue.put({"type": "done", "response": response})
-        except httpx.HTTPStatusError as e:
-            detail = f"YouTrack API error: {e}"
-            if e.response.status_code == 404:
-                detail = f"Resource not found: {e}"
-            await queue.put({"type": "error", "detail": detail})
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             await queue.put({"type": "error", "detail": f"Summarize error: {e}"})
 
     async def generate():
-        watcher = asyncio.create_task(disconnect_watcher())
         task = asyncio.create_task(runner())
         try:
-            yield json.dumps({"type": "status", "phase": "fetching_activity", "source": display_name}) + "\n"
+            yield json.dumps({"type": "status", "phase": initial_phase, "source": display_name}) + "\n"
             while True:
-                msg = await queue.get()
+                try:
+                    msg = await asyncio.wait_for(queue.get(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    if await request.is_disconnected():
+                        break
+                    continue
                 yield json.dumps(msg) + "\n"
                 if msg.get("type") in ("done", "error"):
                     break
         finally:
-            stop.set()
-            watcher.cancel()
             task.cancel()
-            for t in (watcher, task):
-                try:
-                    await t
-                except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                    pass
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
 
-    return StreamingResponse(
-        generate(),
-        media_type="application/x-ndjson",
-        headers={
-            "Cache-Control": "no-cache, no-store, no-transform",
-            "X-Accel-Buffering": "no",
-            "Connection": "keep-alive",
-        },
+    return StreamingResponse(generate(), media_type="application/x-ndjson")
+
+
+@router.post("/activity/summarize/stream")
+async def stream_summarize_from_events(
+    body: ActivitySummaryFromEventsRequest,
+    request: Request,
+):
+    """Summarise already-fetched events (sent inline) without re-querying YouTrack.
+
+    Used by the Activity view, where the events are already loaded in the browser.
+    """
+    style = body.summary_style or "detailed"
+    return _stream_activity_summary(
+        request=request,
+        activities=body.activities,
+        display_name=body.source_name,
+        since=body.since,
+        until=body.until,
+        style=style,
+        model=body.model_name or settings.default_model,
+        custom_prompt=body.custom_prompt if style == "custom" else None,
+        persist_source_type=body.source_type,
+        persist_source_id=body.source_id,
     )
 
 
-# ── Activity Snapshots ──
 
 @router.post("/activity-snapshots", response_model=ActivitySnapshotRead, status_code=201)
 def create_activity_snapshot(body: ActivitySnapshotCreate, db: Session = Depends(get_db)):
@@ -1019,6 +763,83 @@ def get_activity_snapshot_raw(snapshot_id: str, db: Session = Depends(get_db)):
     return {"activities": json.loads(snap.raw_json)}
 
 
+@router.post("/activity-snapshots/{snapshot_id}/summarize", response_model=ActivitySummaryRead, status_code=201)
+async def summarize_activity_snapshot(
+    snapshot_id: str,
+    body: ActivitySnapshotSummarizeRequest,
+    db: Session = Depends(get_db),
+):
+    """Summarise a saved activity snapshot in the background.
+
+    Returns immediately with a ``running`` ActivitySummary; generation continues
+    server-side (surviving a page refresh) and the client polls for completion.
+    """
+    snap = db.get(ActivitySnapshot, snapshot_id)
+    if not snap:
+        raise HTTPException(404, "Activity snapshot not found")
+
+    activities = [ActivityItem(**item) for item in json.loads(snap.raw_json)]
+    style = body.summary_style or "detailed"
+    model = body.model_name or settings.default_model
+    custom_prompt = body.custom_prompt if style == "custom" else None
+    display_name = snap.user_label or snap.source_name
+
+    row = ActivitySummary(
+        source_type=snap.source_type,
+        source_id=snap.source_id,
+        source_name=display_name,
+        since=snap.since,
+        until=snap.until,
+        summary_style=style,
+        custom_prompt=custom_prompt,
+        model_name=model,
+        activity_count=len(activities),
+        summary_markdown="",
+        used_llm=True,
+        status="running",
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    summary_id = row.id
+
+    async def work(bg_db):
+        markdown, used_llm = await activity_summary_service.summarize_activity(
+            board_name=display_name, since=snap.since, until=snap.until,
+            activities=activities, style=style, model=model, custom_prompt=custom_prompt,
+        )
+        r = bg_db.get(ActivitySummary, summary_id)
+        if r is not None:
+            r.summary_markdown = markdown
+            r.used_llm = used_llm
+            r.status = "completed"
+            bg_db.commit()
+
+    def set_terminal(bg_db, status, error):
+        r = bg_db.get(ActivitySummary, summary_id)
+        if r is not None:
+            r.status = status
+            r.error = error
+            bg_db.commit()
+
+    await job_manager.launch(summary_id, work, set_terminal)
+    db.refresh(row)
+    return row
+
+
+@router.post("/activity-summaries/{summary_id}/cancel", response_model=ActivitySummaryRead)
+def cancel_activity_summary(summary_id: str, db: Session = Depends(get_db)):
+    row = db.get(ActivitySummary, summary_id)
+    if not row:
+        raise HTTPException(404, "Activity summary not found")
+    if row.status in ("pending", "running"):
+        if not job_manager.cancel(summary_id):
+            row.status = "cancelled"
+            row.error = "Cancelled by user."
+            db.commit()
+    return get_activity_summary(summary_id, db)
+
+
 @router.delete("/activity-snapshots/{snapshot_id}", status_code=204)
 def delete_activity_snapshot(snapshot_id: str, db: Session = Depends(get_db)):
     snap = db.get(ActivitySnapshot, snapshot_id)
@@ -1039,7 +860,6 @@ def update_activity_snapshot_label(snapshot_id: str, body: ItemLabelUpdate, db: 
     return snap
 
 
-# ── Activity Snapshot Comments ──
 
 @router.get("/activity-snapshots/{snapshot_id}/comments", response_model=list[SummaryCommentRead])
 def list_snapshot_comments(snapshot_id: str, db: Session = Depends(get_db)):
@@ -1079,141 +899,163 @@ def delete_snapshot_comment(
     comment_service.delete_comment(db, comment_id)
 
 
+_ISSUE_ID_RE = re.compile(r"\b[A-Z][A-Z0-9]+-\d+\b")
+_TOKENS_PER_EVENT_LINE = 30
+
+
+async def _resolve_event_line_budget(model: str) -> int:
+    """How many raw event lines fit the model's context (after scaffold/output)."""
+    from app.services import llm_budget
+
+    tokens = await llm_budget.resolve_token_budget(model, reserved=2_000)
+    return max(80, tokens // _TOKENS_PER_EVENT_LINE)
+
+
+def _build_snapshot_reply_context(
+    snap, events: list, question: str, tz: str | None, max_lines: int,
+) -> str:
+    """Build the LLM context for an activity-snapshot follow-up question.
+
+    If the question references specific issue IDs (e.g. "PROJ-123"), that issue's
+    *entire* activity is surfaced up-front (grouped by issue), regardless of the
+    overall event cap — so questions about a specific issue always have full
+    context. The remaining activity follows in chronological order (capped).
+    """
+    from datetime import datetime as _dt, timezone as _utc
+
+    try:
+        from zoneinfo import ZoneInfo
+        zone = ZoneInfo(tz) if tz else _utc.utc
+    except Exception:
+        zone = _utc.utc
+
+    def fmt_ts(ms) -> str:
+        try:
+            return _dt.fromtimestamp(int(ms) / 1000, tz=zone).strftime("%Y-%m-%d %H:%M %Z")
+        except Exception:
+            return str(ms)
+
+    def ts(ev) -> int:
+        try:
+            return int(ev.get("timestamp") or 0)
+        except Exception:
+            return 0
+
+    def line(ev, *, with_issue: bool) -> str:
+        bits = [fmt_ts(ev.get("timestamp"))]
+        if with_issue and ev.get("issue_id"):
+            bits.append(str(ev["issue_id"]))
+        if ev.get("activity_type"):
+            bits.append(str(ev["activity_type"]))
+        if ev.get("field"):
+            bits.append(f"field={ev['field']}")
+        if ev.get("old_value") or ev.get("new_value"):
+            bits.append(f"{ev.get('old_value') or '∅'} → {ev.get('new_value') or '∅'}")
+        if ev.get("comment_text"):
+            bits.append(f"comment: {str(ev['comment_text'])[:200]}")
+        if ev.get("author"):
+            bits.append(f"by {ev['author']}")
+        return "  " + " | ".join(bits)
+
+    dict_events = [e for e in events if isinstance(e, dict)]
+    chrono = sorted(dict_events, key=ts)
+
+    parts = [
+        f"Activity snapshot: {snap.source_name} | range {snap.since} → {snap.until} "
+        f"| {len(dict_events)} event(s) shown. Each line begins with the event's real "
+        f"timestamp; events are in chronological order (oldest first). Use the "
+        f"timestamps — not the current date or line position — for time/ordering answers.",
+    ]
+
+    present_ids = {e.get("issue_id") for e in dict_events if e.get("issue_id")}
+    mentioned = set(_ISSUE_ID_RE.findall(question or ""))
+    focus_ids = [i for i in sorted(mentioned) if i in present_ids]
+
+    if focus_ids:
+        parts.append("\n## Activity for the issue(s) you asked about")
+        for iid in focus_ids:
+            iss_events = sorted((e for e in dict_events if e.get("issue_id") == iid), key=ts)
+            summary = next((e.get("issue_summary") for e in iss_events if e.get("issue_summary")), "")
+            parts.append(f"\n### {iid}" + (f" — {summary}" if summary else ""))
+            parts.extend(line(e, with_issue=False) for e in iss_events)
+        missing = sorted(mentioned - set(focus_ids))
+        if missing:
+            parts.append(f"\n(No activity for {', '.join(missing)} in this snapshot.)")
+
+    rest = [e for e in chrono if e.get("issue_id") not in focus_ids]
+    if not rest:
+        return "\n".join(parts)
+
+    header = "Other activity" if focus_ids else "Activity"
+    if len(rest) <= max_lines:
+        parts.append(f"\n## {header}")
+        parts.extend(line(e, with_issue=True) for e in rest)
+    else:
+        items: list[ActivityItem] = []
+        for e in rest:
+            try:
+                items.append(ActivityItem(**e))
+            except Exception:
+                continue
+        agg = activity_summary_service.aggregate_by_issue(items)
+        parts.append(
+            f"\n## {header} — {len(rest)} events across {len(agg)} issues, "
+            f"summarized one line per issue (most recent first):"
+        )
+        for rec in agg[:max_lines]:
+            parts.append("  " + activity_summary_service.format_aggregated_line(rec))
+        if len(agg) > max_lines:
+            parts.append(f"  (… {len(agg) - max_lines} less-recent issue(s) omitted)")
+
+    return "\n".join(parts)
+
+
+_EVENT_HAY_FIELDS = ("issue_id", "issue_summary", "author", "comment_text", "old_value", "new_value", "field")
+
+
 @router.post("/activity-snapshots/{snapshot_id}/comments/{comment_id}/generate")
 async def generate_snapshot_comment_reply(
     snapshot_id: str,
     comment_id: str,
+    request: Request,
+    tz: str | None = None,
+    model: str | None = Query(None),
+    filters: list[str] = Query(default=[], alias="filter"),
+    type_filter: str | None = Query(default=None, alias="type"),
     db: Session = Depends(get_db),
 ):
     snap = db.get(ActivitySnapshot, snapshot_id)
     if not snap:
         raise HTTPException(404, "Activity snapshot not found")
 
-    c = comment_service.get_comment(db, comment_id)
-    if not c or c.summary_type != "activity-snapshot" or c.summary_id != snapshot_id:
-        raise HTTPException(404, "Comment not found")
-    if c.comment_type != "request":
-        raise HTTPException(400, "Only 'request' comments can generate AI replies")
+    c = comment_service.get_request_comment_or_404(db, comment_id, summary_type="activity-snapshot", summary_id=snapshot_id)
 
     try:
         events = json.loads(snap.raw_json)
     except Exception:
         events = []
 
-    MAX_EVENTS = 200
-    lines = [
-        f"Activity snapshot: {snap.source_name} | {snap.since} → {snap.until} | {snap.activity_count} events"
-    ]
-    for ev in events[:MAX_EVENTS]:
-        if isinstance(ev, dict):
-            parts = [
-                f"{k}={ev[k]}"
-                for k in ("timestamp", "author", "issue_id", "type", "field", "old_value", "new_value", "text")
-                if ev.get(k)
-            ]
-            lines.append("  " + " | ".join(parts))
-    if len(events) > MAX_EVENTS:
-        lines.append(f"  ... ({len(events) - MAX_EVENTS} more events not shown)")
+    events = [e for e in events if isinstance(e, dict)]
+    if type_filter and type_filter != "all":
+        events = [e for e in events if e.get("activity_type") == type_filter]
+    if filters:
+        def _hay(e: dict) -> str:
+            return " ".join(str(e[k]) for k in _EVENT_HAY_FIELDS if e.get(k))
+        events = [e for e in events if comment_service.matches_terms(_hay(e), filters)]
 
+    max_lines = await _resolve_event_line_budget(model or settings.default_model)
     return await comment_service.stream_reply(
         db,
         summary_type="activity-snapshot",
         parent_id=snapshot_id,
         comment=c,
-        context_markdown="\n".join(lines),
-        model=settings.default_model,
-    )
-
-
-@router.post("/projects/{short_name}/activity/summarize/stream")
-async def stream_summarize_project_activity(
-    short_name: str,
-    body: ActivitySummaryRequest,
-    request: Request,
-    db: Session = Depends(get_db),
-):
-    token = _get_token(db)
-    base_url = _get_base_url(db)
-    if not base_url:
-        raise HTTPException(400, "YouTrack base URL not configured")
-    since_ts, until_ts = _parse_date_range(body.since, body.until)
-
-    project_name = short_name
-    try:
-        projects = list_projects(base_url, token, include_archived=True)
-        match = next((p for p in projects if p["short_name"] == short_name), None)
-        if match:
-            project_name = match["name"]
-    except Exception as e:
-        logger.warning("Failed to resolve project name for %s: %s", short_name, e)
-
-    def build_response(activities: list[ActivityItem], markdown: str, model: str, used_llm: bool) -> dict:
-        return {
-            "project_short_name": short_name,
-            "project_name": project_name,
-        }
-
-    return _stream_summarize(
+        context_markdown=_build_snapshot_reply_context(snap, events, c.user_content, tz, max_lines),
+        model=model or settings.default_model,
+        tz=tz,
         request=request,
-        token=token,
-        base_url=base_url,
-        project_ids=[short_name],
-        display_name=f"{project_name} ({short_name})",
-        body=body,
-        since_ts=since_ts,
-        until_ts=until_ts,
-        build_response=build_response,
-        persist_source_type="project",
-        persist_source_id=short_name,
     )
 
 
-@router.post("/boards/{board_db_id}/activity/summarize/stream")
-async def stream_summarize_board_activity(
-    board_db_id: str,
-    body: ActivitySummaryRequest,
-    request: Request,
-    db: Session = Depends(get_db),
-):
-    board = db.get(YouTrackBoard, board_db_id)
-    if not board:
-        raise HTTPException(404, "Board not found")
-
-    token = _get_token(db)
-    base_url = _get_base_url(db)
-    if not base_url:
-        raise HTTPException(400, "YouTrack base URL not configured")
-    since_ts, until_ts = _parse_date_range(body.since, body.until)
-
-    try:
-        project_ids = get_board_project_ids(base_url, token, board.board_id)
-    except Exception as e:
-        raise HTTPException(502, f"Failed to get board projects: {e}")
-    if not project_ids:
-        raise HTTPException(404, "No projects found for this board")
-
-    def build_response(activities: list[ActivityItem], markdown: str, model: str, used_llm: bool) -> dict:
-        return {
-            "board_id": board.id,
-            "board_name": board.board_name,
-        }
-
-    return _stream_summarize(
-        request=request,
-        token=token,
-        base_url=base_url,
-        project_ids=project_ids,
-        display_name=board.board_name or board.board_id,
-        body=body,
-        since_ts=since_ts,
-        until_ts=until_ts,
-        build_response=build_response,
-        persist_source_type="board",
-        persist_source_id=board.id,
-    )
-
-
-# ── Persisted activity summaries (read + list + delete) ──
 
 def _enrich_with_comment_count(rows: list[ActivitySummary], db: Session) -> list[dict]:
     """Add comment_count to each ActivitySummary row for the list response."""
@@ -1280,11 +1122,9 @@ def update_activity_summary_label(summary_id: str, body: ItemLabelUpdate, db: Se
     row.user_label = body.user_label.strip() if body.user_label else None
     db.commit()
     db.refresh(row)
-    # Return via the same helper that builds comment_count
     return get_activity_summary(summary_id, db)
 
 
-# ── Activity Summary Comments ──
 
 @router.get("/activity-summaries/{summary_id}/comments", response_model=list[SummaryCommentRead])
 def list_activity_comments(summary_id: str, db: Session = Depends(get_db)):
@@ -1328,28 +1168,28 @@ def delete_activity_comment(
 async def generate_activity_comment_reply(
     summary_id: str,
     comment_id: str,
+    request: Request,
+    tz: str | None = None,
+    model: str | None = Query(None),
     db: Session = Depends(get_db),
 ):
     row = db.get(ActivitySummary, summary_id)
     if not row:
         raise HTTPException(404, "Activity summary not found")
 
-    c = comment_service.get_comment(db, comment_id)
-    if not c or c.summary_type != "activity" or c.summary_id != summary_id:
-        raise HTTPException(404, "Comment not found")
-    if c.comment_type != "request":
-        raise HTTPException(400, "Only 'request' comments can generate AI replies")
+    c = comment_service.get_request_comment_or_404(db, comment_id, summary_type="activity", summary_id=summary_id)
 
     return await comment_service.stream_reply(
         db,
+        request=request,
         summary_type="activity",
         parent_id=summary_id,
         comment=c,
         context_markdown=row.summary_markdown,
-        model=settings.default_model,
+        model=model or settings.default_model,
+        tz=tz,
     )
 
-# ── Issue Tracking endpoints ──────────────────────────────────────────────
 
 @router.get("/issues/search", response_model=list[IssueSearchResult])
 def search_yt_issues(
@@ -1431,7 +1271,6 @@ async def fetch_issue_activity(body: IssueActivityRequest, db: Session = Depends
         raise HTTPException(400, "YouTrack not configured")
     since_ts = int(datetime.strptime(body.since, "%Y-%m-%d").replace(tzinfo=UTC).timestamp() * 1000)
     until_ts = int(datetime.strptime(body.until, "%Y-%m-%d").replace(tzinfo=UTC).timestamp() * 1000) + 86_400_000
-    # Pull summaries from local DB — avoids one GET /api/issues/{id} per issue
     tracked = db.query(TrackedIssue).filter(TrackedIssue.issue_id.in_(body.issue_ids)).all()
     summaries = {t.issue_id: t.summary for t in tracked}
     try:
@@ -1449,7 +1288,6 @@ def get_commits_for_issue(issue_id: str, db: Session = Depends(get_db)):
     from sqlalchemy import or_
     from app.models import CommitRecord, Repository
     from app.schemas import CommitRead
-    # Only alphanumeric + hyphen — same characters YouTrack issue IDs use
     import re as _re
     if not _re.match(r"^[A-Za-z0-9\-_]+$", issue_id):
         raise HTTPException(400, "Invalid issue ID format")

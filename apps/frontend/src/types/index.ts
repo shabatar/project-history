@@ -32,7 +32,8 @@ export interface SummaryJob {
   summary_style: SummaryStyle;
   custom_prompt?: string;
   user_label: string | null;
-  status: 'pending' | 'running' | 'completed' | 'failed';
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+  error?: string | null;
   created_at: string;
   result: SummaryResult | null;
 }

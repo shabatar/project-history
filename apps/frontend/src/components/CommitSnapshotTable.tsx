@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import dayjs from 'dayjs';
+import { renderWithIssueLinks } from '../lib/issueLinks';
 
 interface SnapshotCommit {
   commit_hash: string;
@@ -41,7 +42,7 @@ export function CommitSnapshotTable({ commits, pageSize = 100, extraClass = '' }
                   <span className="snap-commit-hash">{c.commit_hash.slice(0, 7)}</span>
                 </td>
                 <td className="snap-author">{c.author_name}</td>
-                <td className="snap-detail snap-commit-subject">{c.subject}</td>
+                <td className="snap-detail snap-commit-subject">{renderWithIssueLinks(c.subject)}</td>
               </tr>
             ))}
           </tbody>

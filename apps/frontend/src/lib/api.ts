@@ -70,11 +70,13 @@ export async function listCommits(
   since?: string,
   until?: string,
   limit?: number,
+  branch?: string,
 ): Promise<Commit[]> {
   const params: Record<string, string | number> = {};
   if (since) params.since = since;
   if (until) params.until = until;
   if (limit) params.limit = limit;
+  if (branch) params.branch = branch;
   const { data } = await client.get<Commit[]>(
     `/repositories/${repositoryId}/commits`,
     { params },
@@ -136,6 +138,11 @@ export async function listSummaries(
 
 export async function getSummary(jobId: string): Promise<SummaryJob> {
   const { data } = await client.get<SummaryJob>(`/summaries/${jobId}`);
+  return data;
+}
+
+export async function cancelSummary(jobId: string): Promise<SummaryJob> {
+  const { data } = await client.post<SummaryJob>(`/summaries/${jobId}/cancel`);
   return data;
 }
 
@@ -340,19 +347,6 @@ export async function fetchBoardActivity(
   return data;
 }
 
-export interface ActivitySummaryResponse {
-  board_id: string;
-  board_name: string;
-  since: string;
-  until: string;
-  summary_style: 'short' | 'detailed' | 'manager';
-  model_name: string;
-  activity_count: number;
-  summary_markdown: string;
-  used_llm: boolean;
-  generated_at: string;
-}
-
 // ── YouTrack Projects (project-level activity) ──
 
 export interface YouTrackProject {
@@ -371,39 +365,12 @@ export interface ProjectActivityResponse {
   activities: ActivityItem[];
 }
 
-export interface ProjectActivitySummaryResponse {
-  project_short_name: string;
-  project_name: string;
-  since: string;
-  until: string;
-  summary_style: 'short' | 'detailed' | 'manager';
-  model_name: string;
-  activity_count: number;
-  summary_markdown: string;
-  used_llm: boolean;
-  generated_at: string;
-}
-
 export async function listYouTrackProjects(
   includeArchived = false,
 ): Promise<YouTrackProject[]> {
   const { data } = await client.get<YouTrackProject[]>('/youtrack/projects', {
     params: { include_archived: includeArchived },
   });
-  return data;
-}
-
-export async function fetchProjectActivity(
-  shortName: string,
-  since: string,
-  until: string,
-  signal?: AbortSignal,
-): Promise<ProjectActivityResponse> {
-  const { data } = await client.post<ProjectActivityResponse>(
-    `/youtrack/projects/${encodeURIComponent(shortName)}/activity`,
-    { since, until },
-    { timeout: 600_000, signal },
-  );
   return data;
 }
 
@@ -515,28 +482,10 @@ export async function streamProjectActivity(
   );
 }
 
-export async function summarizeProjectActivity(
-  shortName: string,
-  input: {
-    since: string;
-    until: string;
-    summary_style?: 'short' | 'detailed' | 'custom';
-    custom_prompt?: string;
-    model_name?: string;
-  },
-  signal?: AbortSignal,
-): Promise<ProjectActivitySummaryResponse> {
-  const { data } = await client.post<ProjectActivitySummaryResponse>(
-    `/youtrack/projects/${encodeURIComponent(shortName)}/activity/summarize`,
-    input,
-    { timeout: 600_000, signal },
-  );
-  return data;
-}
-
 export type SummaryStreamEvent =
   | { type: 'status'; phase: string; source?: string; model?: string; activity_count?: number }
   | { type: 'progress'; phase: string; done: number; total: number; events_so_far: number }
+  | { type: 'token'; text: string }
   | { type: 'done'; response: Record<string, unknown> }
   | { type: 'error'; detail: string };
 
@@ -554,31 +503,23 @@ type SummarizeStreamOpts = {
   signal?: AbortSignal;
 };
 
-/** Stream AI-summary generation for a YouTrack project's activity. */
-export async function streamSummarizeProjectActivity(
-  shortName: string,
-  input: SummarizeInput,
+/** Stream AI-summary generation from events already loaded in the browser (no re-fetch). */
+export async function streamSummarizeActivityEvents(
+  input: SummarizeInput & {
+    source_type: 'board' | 'project';
+    source_id: string;
+    source_name: string;
+    activities: ActivityItem[];
+  },
   opts: SummarizeStreamOpts,
 ): Promise<void> {
   return readNdjsonStream<SummaryStreamEvent>(
-    `/youtrack/projects/${encodeURIComponent(shortName)}/activity/summarize/stream`,
+    `/youtrack/activity/summarize/stream`,
     input,
-    { ...opts, tag: '[summarize-stream]' },
+    { ...opts, tag: '[summarize-events-stream]' },
   );
 }
 
-/** Stream AI-summary generation for a tracked YouTrack board's activity. */
-export async function streamSummarizeBoardActivity(
-  boardId: string,
-  input: SummarizeInput,
-  opts: SummarizeStreamOpts,
-): Promise<void> {
-  return readNdjsonStream<SummaryStreamEvent>(
-    `/youtrack/boards/${encodeURIComponent(boardId)}/activity/summarize/stream`,
-    input,
-    { ...opts, tag: '[summarize-stream]' },
-  );
-}
 
 export interface ActivitySummaryRecord {
   id: string;
@@ -593,6 +534,8 @@ export interface ActivitySummaryRecord {
   activity_count: number;
   summary_markdown: string;
   used_llm: boolean;
+  status?: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+  error?: string | null;
   user_label: string | null;
   generated_at: string;
   comment_count: number;
@@ -623,27 +566,24 @@ export async function listActivitySummaries(limit = 100): Promise<ActivitySummar
   return data;
 }
 
-export async function deleteActivitySummary(id: string): Promise<void> {
-  await client.delete(`/youtrack/activity-summaries/${id}`);
-}
-
-export async function summarizeBoardActivity(
-  boardId: string,
-  input: {
-    since: string;
-    until: string;
-    summary_style?: 'short' | 'detailed' | 'custom';
-    custom_prompt?: string;
-    model_name?: string;
-  },
-  signal?: AbortSignal,
-): Promise<ActivitySummaryResponse> {
-  const { data } = await client.post<ActivitySummaryResponse>(
-    `/youtrack/boards/${boardId}/activity/summarize`,
-    input,
-    { timeout: 600_000, signal },
+export async function summarizeActivitySnapshot(
+  snapshotId: string,
+  body: { summary_style?: 'short' | 'detailed' | 'custom'; custom_prompt?: string; model_name?: string },
+): Promise<ActivitySummaryRecord> {
+  const { data } = await client.post<ActivitySummaryRecord>(
+    `/youtrack/activity-snapshots/${encodeURIComponent(snapshotId)}/summarize`,
+    body,
   );
   return data;
+}
+
+export async function cancelActivitySummary(id: string): Promise<ActivitySummaryRecord> {
+  const { data } = await client.post<ActivitySummaryRecord>(`/youtrack/activity-summaries/${id}/cancel`);
+  return data;
+}
+
+export async function deleteActivitySummary(id: string): Promise<void> {
+  await client.delete(`/youtrack/activity-summaries/${id}`);
 }
 
 // ── Features ──
@@ -728,10 +668,25 @@ export async function streamGenerateReply(
   opts: {
     onEvent: (e: CommentGenerateEvent) => void;
     signal?: AbortSignal;
+    /** Extra query params (e.g. active filters) forwarded to the backend. */
+    params?: Record<string, string | string[] | undefined>;
   },
 ): Promise<void> {
-  const url = `${commentBase(summaryType, summaryId)}/${commentId}/generate`;
-  return readNdjsonStream<CommentGenerateEvent>(url, {}, { ...opts, tag: '[comment-generate]' });
+  const sp = new URLSearchParams();
+  // Pass the viewer's IANA timezone so the AI answers time-related questions in local time.
+  try {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (tz) sp.set('tz', tz);
+  } catch { /* ignore */ }
+  for (const [k, v] of Object.entries(opts.params ?? {})) {
+    if (Array.isArray(v)) v.forEach((x) => x && sp.append(k, x));
+    else if (v) sp.set(k, v);
+  }
+  const qs = sp.toString();
+  const url = `${commentBase(summaryType, summaryId)}/${commentId}/generate${qs ? `?${qs}` : ''}`;
+  return readNdjsonStream<CommentGenerateEvent>(url, {}, {
+    onEvent: opts.onEvent, signal: opts.signal, tag: '[comment-generate]',
+  });
 }
 
 // ── Snapshots ──
@@ -796,6 +751,7 @@ export async function saveCommitSnapshot(body: {
   until?: string;
   branch?: string;
   base_branch?: string;
+  user_label?: string;
   commits: Array<{ commit_hash: string; author_name: string; author_email: string; committed_at: string; subject: string }>;
 }): Promise<CommitSnapshot> {
   const { data } = await client.post<CommitSnapshot>('/commit-snapshots', body);
@@ -811,6 +767,18 @@ export async function listCommitSnapshots(repositoryId?: string, limit = 100): P
 
 export async function deleteCommitSnapshot(id: string): Promise<void> {
   await client.delete(`/commit-snapshots/${id}`);
+}
+
+/** Generate an AI summary from a saved commit snapshot; persisted as a new git-summary report. */
+export async function summarizeCommitSnapshot(
+  id: string,
+  input: { summary_style?: SummaryStyle; custom_prompt?: string; model_name?: string },
+  signal?: AbortSignal,
+): Promise<SummaryJob> {
+  const { data } = await client.post<SummaryJob>(
+    `/commit-snapshots/${id}/summarize`, input, { signal, timeout: 600_000 },
+  );
+  return data;
 }
 
 export async function patchItemLabel(

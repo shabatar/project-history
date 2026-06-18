@@ -41,8 +41,8 @@ describe('renderMarkdown sanitization', () => {
 
   it('renders headings correctly', () => {
     const html = renderMarkdown('# Title\n## Subtitle', null);
-    expect(html).toContain('<h2>Title</h2>');
-    expect(html).toContain('<h3>Subtitle</h3>');
+    expect(html).toContain('<h1>Title</h1>');
+    expect(html).toContain('<h2>Subtitle</h2>');
   });
 
   it('renders lists correctly', () => {
